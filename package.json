@@ -1,0 +1,22 @@
+{
+  "name": "copilot-dsh-provider",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blackflag0623/copilot-dsh-provider.git"
+  },
+  "scripts": {
+    "auth": "bun run src/main.ts auth",
+    "start": "bun run src/main.ts start",
+    "test": "bun test",
+    "typecheck": "tsc",
+    "build": "bun build src/main.ts --target=bun --outdir=dist"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.23",
+    "typescript": "^5.9.3"
+  }
+}
