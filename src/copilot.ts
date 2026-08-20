@@ -14,6 +14,9 @@ interface CopilotModel {
   model_picker_enabled?: boolean
   supported_endpoints?: string[]
   capabilities?: {
+    supports?: {
+      vision?: boolean
+    }
     limits?: {
       max_context_window_tokens?: number
       max_output_tokens?: number
@@ -59,6 +62,9 @@ export class CopilotClient {
             ...(limits?.max_output_tokens === undefined
               ? {}
               : { max_output_tokens: limits.max_output_tokens }),
+            ...(model.capabilities?.supports?.vision === true
+              ? { input: ["text", "image"] }
+              : {}),
           }
         }),
       has_more: false,

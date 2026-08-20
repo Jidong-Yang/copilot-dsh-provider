@@ -26,6 +26,7 @@ test("lists only Responses-compatible models with reported capacities", async ()
             vendor: "OpenAI",
             supported_endpoints: ["responses"],
             capabilities: {
+              supports: { vision: true },
               limits: {
                 max_context_window_tokens: 1_050_000,
                 max_output_tokens: 128_000,
@@ -56,6 +57,7 @@ test("lists only Responses-compatible models with reported capacities", async ()
       display_name: "GPT-5.6 Sol",
       context_window: 1_050_000,
       max_output_tokens: 128_000,
+      input: ["text", "image"],
     }],
     has_more: false,
   })

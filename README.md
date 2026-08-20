@@ -29,7 +29,7 @@ Add a custom provider in **Settings -> Models**:
 | API protocol | `openai-responses` |
 | API key | Any non-secret placeholder, such as `local-copilot-provider` |
 
-Use **Fetch available models**, choose the models to expose, and save. Context and output limits are included when Copilot supplies them.
+Use **Fetch available models**, choose the models to expose, and save. Context and output limits are included when Copilot supplies them. Models whose Copilot metadata declares vision include `input: [text, image]`; this requires a DeepSeek Harness build whose model discovery preserves the `input` extension.
 
 ## API
 
