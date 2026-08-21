@@ -76,7 +76,7 @@ export class CopilotClient {
     return await fetch(`${session.apiBase}/responses`, {
       method: "POST",
       headers: copilotHeaders(session.token, hasAgentInput(payload)),
-      body: JSON.stringify(payload),
+      body: JSON.stringify(withExplicitNonStrictTools(payload)),
       signal,
     })
   }
@@ -134,6 +134,17 @@ function hasAgentInput(payload: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function withExplicitNonStrictTools(payload: unknown): unknown {
+  if (!isRecord(payload) || !Array.isArray(payload["tools"])) return payload
+  let changed = false
+  const tools = payload["tools"].map((tool) => {
+    if (!isRecord(tool) || tool["type"] !== "function" || "strict" in tool) return tool
+    changed = true
+    return { ...tool, strict: false }
+  })
+  return changed ? { ...payload, tools } : payload
 }
 
 class RetryableHttpError extends Error {

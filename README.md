@@ -2,7 +2,14 @@
 
 A minimal localhost provider that exposes GitHub Copilot models to DeepSeek Harness through the OpenAI Responses API.
 
-This project deliberately contains no agent loop. DeepSeek Harness owns prompts, sessions, tools, permissions, retries, and durable logs. The provider only performs GitHub authentication, refreshes the short-lived Copilot token, lists compatible models, and passes Responses requests and streams through unchanged.
+This project deliberately contains no agent loop. DeepSeek Harness owns prompts, sessions, tools, permissions, retries, and durable logs. The provider only performs GitHub authentication, refreshes the short-lived Copilot token, lists compatible models, and otherwise passes Responses requests and streams through unchanged.
+
+One wire-compatibility normalization is applied to function tools: when `strict`
+is omitted, the provider sends `strict: false` explicitly. This is the OpenAI
+Responses default, but Copilot's Responses endpoint otherwise causes GPT-5.x
+models to populate optional tool properties as if they were required. Explicit
+`strict` values, JSON Schemas, tool arguments, call IDs, results, and stream
+events are preserved.
 
 > [!WARNING]
 > GitHub does not document or support the Copilot inference endpoints used here. They can change without notice, and automated use can trigger rate limits or account restrictions.

@@ -63,10 +63,26 @@ test("lists only Responses-compatible models with reported capacities", async ()
   })
 })
 
-test("marks a tool continuation as agent-initiated without changing its body", async () => {
+test("marks a tool continuation as agent-initiated and makes non-strict tools explicit", async () => {
+  const parameters = {
+    type: "object",
+    properties: {
+      command: { type: "string" },
+      description: { type: "string" },
+      sandbox_permissions: { type: "string" },
+      justification: { type: "string" },
+    },
+    required: ["command", "description"],
+  }
   const payload = {
     model: "gpt-5.6-sol",
     input: [{ type: "function_call_output", call_id: "call-1", output: "ok" }],
+    tools: [{
+      type: "function",
+      name: "pwsh",
+      description: "Execute PowerShell",
+      parameters,
+    }],
     stream: true,
   }
   const fetchMock = mock((url: string, init?: RequestInit) => {
@@ -80,14 +96,67 @@ test("marks a tool continuation as agent-initiated without changing its body", a
     expect(url).toBe("https://api.githubcopilot.com/responses")
     expect(new Headers(init?.headers).get("x-initiator")).toBe("agent")
     if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
-    expect(JSON.parse(init.body)).toEqual(payload)
-    return Promise.resolve(new Response("data: response.completed\n\n"))
+    expect(JSON.parse(init.body)).toEqual({
+      ...payload,
+      tools: [{ ...payload.tools[0], strict: false }],
+    })
+    expect(parameters.required).toEqual(["command", "description"])
+    return Promise.resolve(new Response([
+      "data: {\"type\":\"response.function_call_arguments.done\",",
+      "\"arguments\":\"{\\\"command\\\":\\\"Get-Location\\\",",
+      "\\\"description\\\":\\\"Inspect location\\\",",
+      "\\\"sandbox_permissions\\\":\\\"workspace-write\\\",",
+      "\\\"justification\\\":\\\"Retry after denial\\\"}\"}\n\n",
+    ].join("")))
   })
   globalThis.fetch = fetchMock as unknown as typeof fetch
 
   const response = await new CopilotClient("github-token").response(payload)
 
-  expect(await response.text()).toBe("data: response.completed\n\n")
+  expect(await response.text()).toContain("\\\"sandbox_permissions\\\":\\\"workspace-write\\\"")
+  expect(payload.tools[0]).not.toHaveProperty("strict")
+})
+
+test("preserves explicit strict modes and non-tool Responses payloads", async () => {
+  const requests: unknown[] = []
+  const fetchMock = mock((url: string, init?: RequestInit) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      return Promise.resolve(Response.json({
+        token: "session-token",
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
+    requests.push(JSON.parse(init.body))
+    return Promise.resolve(new Response("data: response.completed\n\n"))
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+  const strictTools = {
+    model: "gpt-5.6-sol",
+    input: "Use the tool",
+    tools: [
+      { type: "function", name: "strict_tool", parameters: {}, strict: true },
+      { type: "function", name: "loose_tool", parameters: {}, strict: false },
+      { type: "custom", name: "grammar_tool", format: { type: "grammar" } },
+    ],
+  }
+  const imageInput = {
+    model: "gpt-5.6-sol",
+    input: [{
+      role: "user",
+      content: [
+        { type: "input_text", text: "Describe this image" },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+      ],
+    }],
+  }
+
+  await client.response(strictTools)
+  await client.response(imageInput)
+
+  expect(requests).toEqual([strictTools, imageInput])
 })
 
 test("shares one token exchange across concurrent first requests", async () => {
