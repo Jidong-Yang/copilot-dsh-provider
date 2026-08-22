@@ -11,7 +11,7 @@ if (command === "auth") {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("PORT must be an integer from 1 to 65535")
   }
-  const client = new CopilotClient(await readGitHubToken())
+  const client = new CopilotClient(readGitHubToken)
   Bun.serve({
     hostname: "127.0.0.1",
     port,

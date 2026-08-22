@@ -186,3 +186,41 @@ test("shares one token exchange across concurrent first requests", async () => {
 
   expect(exchanges).toBe(1)
 })
+
+test("reloads the GitHub token and retries once after an authorization failure", async () => {
+  const githubTokens = ["github-token-1", "github-token-2"]
+  let tokenReads = 0
+  let exchanges = 0
+  let responses = 0
+  const fetchMock = mock((url: string, init?: RequestInit) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      const authorization = new Headers(init?.headers).get("authorization")
+      exchanges += 1
+      expect(authorization).toBe(`token ${githubTokens[exchanges - 1]}`)
+      return Promise.resolve(Response.json({
+        token: `session-token-${exchanges}`,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    if (url === "https://api.githubcopilot.com/responses") {
+      responses += 1
+      const authorization = new Headers(init?.headers).get("authorization")
+      expect(authorization).toBe(`Bearer session-token-${responses}`)
+      return Promise.resolve(responses === 1
+        ? new Response("expired", { status: 401 })
+        : new Response("ok"))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient(() =>
+    Promise.resolve(githubTokens[tokenReads++] ?? "unexpected-token"))
+
+  const response = await client.response({ input: "hello" })
+
+  expect(await response.text()).toBe("ok")
+  expect(tokenReads).toBe(2)
+  expect(exchanges).toBe(2)
+  expect(responses).toBe(2)
+})

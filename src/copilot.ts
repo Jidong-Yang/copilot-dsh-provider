@@ -28,18 +28,20 @@ interface ModelsReply {
   data: CopilotModel[]
 }
 
+type GitHubTokenSource = string | (() => Promise<string>)
+
 export class CopilotClient {
   private session?: { token: string; expiresAt: number; apiBase: string }
   private pendingSession?: Promise<{ token: string; expiresAt: number; apiBase: string }>
 
-  public constructor(private readonly githubToken: string) {}
+  public constructor(private readonly githubTokenSource: GitHubTokenSource) {}
 
   public async models(signal?: AbortSignal): Promise<object> {
-    const session = await this.sessionToken()
-    const response = await fetch(`${session.apiBase}/models`, {
-      headers: copilotHeaders(session.token, false),
-      signal,
-    })
+    const response = await this.requestWithSession(session =>
+      fetch(`${session.apiBase}/models`, {
+        headers: copilotHeaders(session.token, false),
+        signal,
+      }))
     if (!response.ok) return await passthroughError(response)
     const upstream = await response.json() as ModelsReply
     return {
@@ -72,13 +74,27 @@ export class CopilotClient {
   }
 
   public async response(payload: unknown, signal?: AbortSignal): Promise<Response> {
+    return await this.requestWithSession(session =>
+      fetch(`${session.apiBase}/responses`, {
+        method: "POST",
+        headers: copilotHeaders(session.token, hasAgentInput(payload)),
+        body: JSON.stringify(withExplicitNonStrictTools(payload)),
+        signal,
+      }))
+  }
+
+  private async requestWithSession(
+    request: (
+      session: { token: string; expiresAt: number; apiBase: string },
+    ) => Promise<Response>,
+  ): Promise<Response> {
     const session = await this.sessionToken()
-    return await fetch(`${session.apiBase}/responses`, {
-      method: "POST",
-      headers: copilotHeaders(session.token, hasAgentInput(payload)),
-      body: JSON.stringify(withExplicitNonStrictTools(payload)),
-      signal,
-    })
+    const response = await request(session)
+    if (![401, 403].includes(response.status)) return response
+
+    await response.body?.cancel()
+    if (this.session === session) this.session = undefined
+    return await request(await this.sessionToken())
   }
 
   private async sessionToken(): Promise<{ token: string; expiresAt: number; apiBase: string }> {
@@ -98,9 +114,12 @@ export class CopilotClient {
     expiresAt: number
     apiBase: string
   }> {
+    const githubToken = typeof this.githubTokenSource === "string"
+      ? this.githubTokenSource
+      : await this.githubTokenSource()
     const reply = await retry(async () => {
       const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
-        headers: githubHeaders(this.githubToken),
+        headers: githubHeaders(githubToken),
       })
       if (!response.ok) throw new RetryableHttpError(response)
       return await response.json() as SessionTokenReply

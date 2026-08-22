@@ -11,6 +11,11 @@ models to populate optional tool properties as if they were required. Explicit
 `strict` values, JSON Schemas, tool arguments, call IDs, results, and stream
 events are preserved.
 
+The short-lived Copilot token refreshes automatically. After a new Device Flow
+authorization is saved, the running provider reloads the GitHub token on the
+next token exchange; an upstream 401 or 403 triggers one immediate reload and
+retry, so restarting the provider is not required.
+
 > [!WARNING]
 > GitHub does not document or support the Copilot inference endpoints used here. They can change without notice, and automated use can trigger rate limits or account restrictions.
 
