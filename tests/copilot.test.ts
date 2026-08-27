@@ -224,3 +224,103 @@ test("reloads the GitHub token and retries once after an authorization failure",
   expect(exchanges).toBe(2)
   expect(responses).toBe(2)
 })
+
+test("surfaces a rejected GitHub credential without exposing the upstream body", async () => {
+  const fetchMock = mock(() =>
+    Promise.resolve(new Response("sensitive upstream detail", { status: 401 })))
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("invalid-github-token")
+
+  expect(await client.health()).toMatchObject({
+    status: "reauth-required",
+    code: "github-credential-rejected",
+  })
+  expect(JSON.stringify(await client.health())).not.toContain("sensitive")
+})
+
+test("surfaces and revalidates Copilot API availability with a cached session", async () => {
+  let modelRequests = 0
+  const fetchMock = mock((url: string) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      return Promise.resolve(Response.json({
+        token: "session-token",
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    if (url === "https://api.githubcopilot.com/models") {
+      modelRequests += 1
+      return Promise.resolve(modelRequests === 1
+        ? new Response("unavailable", { status: 503 })
+        : Response.json({ data: [] }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+
+  await expect(client.models()).rejects.toThrow("Copilot request failed (503)")
+  expect(await client.health()).toMatchObject({ status: "ready" })
+  expect(modelRequests).toBe(2)
+})
+
+test("refreshes after an authorization failure during health revalidation", async () => {
+  let exchanges = 0
+  let modelRequests = 0
+  const fetchMock = mock((url: string) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      exchanges += 1
+      return Promise.resolve(exchanges === 1
+        ? Response.json({
+            token: "session-token",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            refresh_in: 1500,
+          })
+        : new Response("credential rejected", { status: 401 }))
+    }
+    if (url === "https://api.githubcopilot.com/models") {
+      modelRequests += 1
+      return Promise.resolve(modelRequests === 1
+        ? new Response("unavailable", { status: 503 })
+        : new Response("session rejected", { status: 401 }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+
+  await expect(client.models()).rejects.toThrow("Copilot request failed (503)")
+  expect(await client.health()).toMatchObject({
+    status: "reauth-required",
+    code: "github-credential-rejected",
+  })
+  expect(exchanges).toBe(2)
+})
+
+test("detects a replacement GitHub credential on the next health check", async () => {
+  let exchanges = 0
+  let modelRequests = 0
+  const fetchMock = mock((url: string) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      exchanges += 1
+      return Promise.resolve(Response.json({
+        token: `session-token-${exchanges}`,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    if (url === "https://api.githubcopilot.com/models") {
+      modelRequests += 1
+      return Promise.resolve(modelRequests <= 2
+        ? new Response("session rejected", { status: 401 })
+        : Response.json({ data: [] }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+
+  await expect(client.models()).rejects.toThrow("Copilot request failed (401)")
+  expect(await client.health()).toMatchObject({ status: "ready" })
+  expect(exchanges).toBe(3)
+})

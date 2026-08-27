@@ -30,11 +30,40 @@ interface ModelsReply {
 
 type GitHubTokenSource = string | (() => Promise<string>)
 
+export interface ModelHealth {
+  status: "checking" | "ready" | "reauth-required" | "upstream-unavailable"
+  code?: "github-credential-rejected" | "copilot-access-rejected" | "upstream-unavailable"
+  observedAt: string
+}
+
 export class CopilotClient {
   private session?: { token: string; expiresAt: number; apiBase: string }
   private pendingSession?: Promise<{ token: string; expiresAt: number; apiBase: string }>
+  private modelHealth: ModelHealth = {
+    status: "checking",
+    observedAt: new Date().toISOString(),
+  }
 
   public constructor(private readonly githubTokenSource: GitHubTokenSource) {}
+
+  public async health(signal?: AbortSignal): Promise<ModelHealth> {
+    try {
+      await this.sessionToken()
+      if (this.modelHealth.status === "upstream-unavailable") {
+        const response = await this.requestWithSession(session =>
+          fetch(`${session.apiBase}/models`, {
+            headers: copilotHeaders(session.token, false),
+            signal,
+          }))
+        await response.body?.cancel()
+      }
+    } catch {
+      if (this.modelHealth.status !== "reauth-required") {
+        this.setHealth("upstream-unavailable", "upstream-unavailable")
+      }
+    }
+    return this.modelHealth
+  }
 
   public async models(signal?: AbortSignal): Promise<object> {
     const response = await this.requestWithSession(session =>
@@ -89,12 +118,38 @@ export class CopilotClient {
     ) => Promise<Response>,
   ): Promise<Response> {
     const session = await this.sessionToken()
-    const response = await request(session)
-    if (![401, 403].includes(response.status)) return response
+    let response: Response
+    try {
+      response = await request(session)
+    } catch (error) {
+      this.setHealth("upstream-unavailable", "upstream-unavailable")
+      throw error
+    }
+    if (![401, 403].includes(response.status)) {
+      this.observeResponse(response)
+      return response
+    }
 
     await response.body?.cancel()
     if (this.session === session) this.session = undefined
-    return await request(await this.sessionToken())
+    let retried: Response
+    let retrySession: { token: string; expiresAt: number; apiBase: string }
+    try {
+      retrySession = await this.sessionToken()
+      retried = await request(retrySession)
+    } catch (error) {
+      if (this.modelHealth.status !== "reauth-required") {
+        this.setHealth("upstream-unavailable", "upstream-unavailable")
+      }
+      throw error
+    }
+    if ([401, 403].includes(retried.status)) {
+      if (this.session === retrySession) this.session = undefined
+      this.setHealth("reauth-required", "copilot-access-rejected")
+    } else {
+      this.observeResponse(retried)
+    }
+    return retried
   }
 
   private async sessionToken(): Promise<{ token: string; expiresAt: number; apiBase: string }> {
@@ -114,16 +169,37 @@ export class CopilotClient {
     expiresAt: number
     apiBase: string
   }> {
-    const githubToken = typeof this.githubTokenSource === "string"
-      ? this.githubTokenSource
-      : await this.githubTokenSource()
-    const reply = await retry(async () => {
-      const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
-        headers: githubHeaders(githubToken),
+    let githubToken: string
+    try {
+      githubToken = typeof this.githubTokenSource === "string"
+        ? this.githubTokenSource
+        : await this.githubTokenSource()
+    } catch (error) {
+      this.setHealth("reauth-required", "github-credential-rejected")
+      throw error
+    }
+    let reply: SessionTokenReply
+    try {
+      reply = await retry(async () => {
+        const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
+          headers: githubHeaders(githubToken),
+        })
+        if (!response.ok) throw new RetryableHttpError(response)
+        return await response.json() as SessionTokenReply
       })
-      if (!response.ok) throw new RetryableHttpError(response)
-      return await response.json() as SessionTokenReply
-    })
+    } catch (error) {
+      if (error instanceof RetryableHttpError && [401, 403].includes(error.response.status)) {
+        this.setHealth(
+          "reauth-required",
+          error.response.status === 401
+            ? "github-credential-rejected"
+            : "copilot-access-rejected",
+        )
+      } else {
+        this.setHealth("upstream-unavailable", "upstream-unavailable")
+      }
+      throw error
+    }
     const apiBase = reply.endpoints?.api?.replace(/\/+$/, "")
       ?? "https://api.githubcopilot.com"
     const session = {
@@ -132,7 +208,27 @@ export class CopilotClient {
       apiBase,
     }
     this.session = session
+    this.setHealth("ready")
     return session
+  }
+
+  private setHealth(
+    status: ModelHealth["status"],
+    code?: ModelHealth["code"],
+  ): void {
+    this.modelHealth = {
+      status,
+      ...(code === undefined ? {} : { code }),
+      observedAt: new Date().toISOString(),
+    }
+  }
+
+  private observeResponse(response: Response): void {
+    if (response.status === 429 || response.status >= 500) {
+      this.setHealth("upstream-unavailable", "upstream-unavailable")
+    } else {
+      this.setHealth("ready")
+    }
   }
 }
 

@@ -5,6 +5,14 @@ import type { Provider } from "../src/server.ts"
 
 test("serves health without exposing credentials or CORS", async () => {
   const handler = createServer({
+    health: (signal?: AbortSignal) => {
+      expect(signal).toBeInstanceOf(AbortSignal)
+      return Promise.resolve({
+      status: "reauth-required",
+      code: "github-credential-rejected",
+      observedAt: "2026-08-27T04:00:00.000Z",
+      })
+    },
     models: () => Promise.resolve({ object: "list", data: [] }),
     response: () => Promise.resolve(new Response()),
   })
@@ -14,7 +22,11 @@ test("serves health without exposing credentials or CORS", async () => {
   const token = await handler(new Request("http://localhost/token"))
 
   expect(health.status).toBe(200)
-  expect(await health.json()).toEqual({ status: "ok" })
+  expect(await health.json()).toEqual({
+    status: "reauth-required",
+    code: "github-credential-rejected",
+    observedAt: "2026-08-27T04:00:00.000Z",
+  })
   expect(health.headers.get("access-control-allow-origin")).toBeNull()
   expect(token.status).toBe(404)
   expect(await token.text()).not.toContain("secret")
@@ -22,6 +34,10 @@ test("serves health without exposing credentials or CORS", async () => {
 
 test("passes a Responses request and response through unchanged", async () => {
   const client: Provider = {
+    health: () => Promise.resolve({
+      status: "ready",
+      observedAt: "2026-08-27T04:00:00.000Z",
+    }),
     response: mock((payload: unknown, signal?: AbortSignal) => {
       expect(payload).toEqual({
         model: "gpt-5.6-sol",

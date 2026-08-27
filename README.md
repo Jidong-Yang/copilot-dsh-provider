@@ -47,11 +47,17 @@ Use **Fetch available models**, choose the models to expose, and save. Context a
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | Readiness |
+| `GET /health` | Safe model-authentication readiness |
 | `GET /v1/models` | Dynamic Responses-compatible model catalog |
 | `POST /v1/responses` | Transparent Responses request and stream proxy |
 
 The inbound API key is intentionally ignored. Never place a GitHub token in the Harness API-key field.
+
+`GET /health` validates the cached or renewed Copilot session credential and
+returns one of `checking`, `ready`, `reauth-required`, or
+`upstream-unavailable`. It exposes only a safe code and observation timestamp;
+it never returns a token, GitHub login, credential path, or upstream error
+body.
 
 ## Checks
 
