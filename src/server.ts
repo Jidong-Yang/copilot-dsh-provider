@@ -1,4 +1,5 @@
 export interface Provider {
+  health: (signal?: AbortSignal) => Promise<object>
   models: (signal?: AbortSignal) => Promise<object>
   response: (payload: unknown, signal?: AbortSignal) => Promise<Response>
 }
@@ -7,7 +8,7 @@ export function createServer(client: Provider): (request: Request) => Promise<Re
   return async (request) => {
     const url = new URL(request.url)
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ status: "ok" })
+      return Response.json(await client.health(request.signal))
     }
     if (request.method === "GET" && url.pathname === "/v1/models") {
       try {
