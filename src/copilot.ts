@@ -29,6 +29,17 @@ interface ModelsReply {
   data: CopilotModel[]
 }
 
+const CODEX_BASE_INSTRUCTIONS = [
+  "You are an autonomous coding agent working in the user's repository.",
+  "Follow system, developer, and user instructions in precedence order, and read applicable repository guidance before changing files.",
+  "Inspect the relevant code and use the available tools to perform the requested work instead of only describing a solution.",
+  "Make precise changes, preserve existing user work, avoid unrelated modifications, and do not use destructive git operations unless explicitly requested.",
+  "Keep credentials and sensitive data private, and respect sandbox and approval boundaries.",
+  "For code changes, run the smallest relevant tests, type checks, or builds and fix failures caused by your work.",
+  "Verify the requested outcome before claiming completion.",
+  "In the final response, concisely state the result and any genuine limitation.",
+].join(" ")
+
 type GitHubTokenSource = string | (() => Promise<string>)
 
 export type CopilotProtocol = "chat-completions" | "responses"
@@ -72,13 +83,7 @@ export class CopilotClient {
     protocol: CopilotProtocol = "responses",
     signal?: AbortSignal,
   ): Promise<object> {
-    const response = await this.requestWithSession(session =>
-      fetch(`${session.apiBase}/models`, {
-        headers: copilotHeaders(session.token, false),
-        signal,
-      }))
-    if (!response.ok) return await passthroughError(response)
-    const upstream = await response.json() as ModelsReply
+    const upstream = await this.fetchModels(signal)
     return {
       object: "list",
       data: upstream.data
@@ -112,6 +117,52 @@ export class CopilotClient {
     }
   }
 
+  public async codexModels(signal?: AbortSignal): Promise<object> {
+    const upstream = await this.fetchModels(signal)
+    const models = upstream.data
+      .filter(model => model.model_picker_enabled !== false)
+      .filter(model => supportsProtocol(model, "responses"))
+
+    return {
+      models: models.map((model, index) => {
+        const efforts = model.capabilities?.supports?.reasoning_effort ?? []
+        const contextWindow = model.capabilities?.limits?.max_context_window_tokens
+        return {
+          slug: model.id,
+          display_name: model.name ?? model.id,
+          description: `${model.name ?? model.id} through GitHub Copilot`,
+          default_reasoning_level: preferredReasoningEffort(efforts),
+          supported_reasoning_levels: efforts.map(effort => ({
+            effort,
+            description: reasoningEffortDescription(effort),
+          })),
+          shell_type: "unified_exec",
+          visibility: "list",
+          supported_in_api: true,
+          priority: models.length - index,
+          availability_nux: null,
+          upgrade: null,
+          base_instructions: CODEX_BASE_INSTRUCTIONS,
+          supports_reasoning_summary_parameter: false,
+          support_verbosity: false,
+          default_verbosity: null,
+          apply_patch_tool_type: null,
+          truncation_policy: { mode: "bytes", limit: 10_000 },
+          ...(contextWindow === undefined
+            ? {}
+            : {
+                context_window: contextWindow,
+                max_context_window: contextWindow,
+              }),
+          experimental_supported_tools: [],
+          input_modalities: model.capabilities?.supports?.vision === true
+            ? ["text", "image"]
+            : ["text"],
+        }
+      }),
+    }
+  }
+
   public async response(payload: unknown, signal?: AbortSignal): Promise<Response> {
     return await this.request("responses", withExplicitNonStrictTools(payload), signal)
   }
@@ -132,6 +183,16 @@ export class CopilotClient {
         body: JSON.stringify(payload),
         signal,
       }))
+  }
+
+  private async fetchModels(signal?: AbortSignal): Promise<ModelsReply> {
+    const response = await this.requestWithSession(session =>
+      fetch(`${session.apiBase}/models`, {
+        headers: copilotHeaders(session.token, false),
+        signal,
+      }))
+    if (!response.ok) return await passthroughError(response)
+    return await response.json() as ModelsReply
   }
 
   private async requestWithSession(
@@ -266,6 +327,18 @@ function normalizeReasoningEfforts(efforts: readonly string[]): Record<string, s
     effort === "none" ? "off" : effort,
     effort,
   ]))
+}
+
+function preferredReasoningEffort(efforts: readonly string[]): string | null {
+  for (const preferred of ["medium", "low", "high", "none"]) {
+    if (efforts.includes(preferred)) return preferred
+  }
+  return efforts[0] ?? null
+}
+
+function reasoningEffortDescription(effort: string): string {
+  if (effort === "none") return "No additional reasoning"
+  return `${effort[0]?.toUpperCase() ?? ""}${effort.slice(1)} reasoning`
 }
 
 function hasAgentInput(payload: unknown): boolean {

@@ -62,6 +62,7 @@ test("lists protocol-compatible models with capabilities reported by Copilot", a
   const client = new CopilotClient("github-token")
   const responses = await client.models("responses")
   const chat = await client.models("chat-completions")
+  const codex = await client.codexModels()
 
   expect(responses).toEqual({
     object: "list",
@@ -105,6 +106,47 @@ test("lists protocol-compatible models with capabilities reported by Copilot", a
       },
     }],
     has_more: false,
+  })
+  expect(codex).toEqual({
+    models: [{
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6 Sol",
+      description: "GPT-5.6 Sol through GitHub Copilot",
+      default_reasoning_level: "medium",
+      supported_reasoning_levels: [
+        { effort: "none", description: "No additional reasoning" },
+        { effort: "low", description: "Low reasoning" },
+        { effort: "medium", description: "Medium reasoning" },
+        { effort: "high", description: "High reasoning" },
+        { effort: "xhigh", description: "Xhigh reasoning" },
+        { effort: "max", description: "Max reasoning" },
+      ],
+      shell_type: "unified_exec",
+      visibility: "list",
+      supported_in_api: true,
+      priority: 1,
+      availability_nux: null,
+      upgrade: null,
+      base_instructions: [
+        "You are an autonomous coding agent working in the user's repository.",
+        "Follow system, developer, and user instructions in precedence order, and read applicable repository guidance before changing files.",
+        "Inspect the relevant code and use the available tools to perform the requested work instead of only describing a solution.",
+        "Make precise changes, preserve existing user work, avoid unrelated modifications, and do not use destructive git operations unless explicitly requested.",
+        "Keep credentials and sensitive data private, and respect sandbox and approval boundaries.",
+        "For code changes, run the smallest relevant tests, type checks, or builds and fix failures caused by your work.",
+        "Verify the requested outcome before claiming completion.",
+        "In the final response, concisely state the result and any genuine limitation.",
+      ].join(" "),
+      supports_reasoning_summary_parameter: false,
+      support_verbosity: false,
+      default_verbosity: null,
+      apply_patch_tool_type: null,
+      truncation_policy: { mode: "bytes", limit: 10_000 },
+      context_window: 1_050_000,
+      max_context_window: 1_050_000,
+      experimental_supported_tools: [],
+      input_modalities: ["text", "image"],
+    }],
   })
 })
 

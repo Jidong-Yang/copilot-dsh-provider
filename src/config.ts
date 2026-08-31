@@ -3,10 +3,10 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 export const GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-export const TOKEN_PATH = join(
-  process.env["COPILOT_DSH_HOME"] ?? join(homedir(), ".copilot-dsh-provider"),
-  "github-token",
-)
+export const PROVIDER_HOME =
+  process.env["COPILOT_DSH_HOME"] ?? join(homedir(), ".copilot-dsh-provider")
+export const TOKEN_PATH = join(PROVIDER_HOME, "github-token")
+export const CODEX_CATALOG_PATH = join(PROVIDER_HOME, "codex-models.json")
 
 const EDITOR_VERSION = process.env["COPILOT_EDITOR_VERSION"] ?? "vscode/1.133.0"
 const PLUGIN_VERSION = process.env["COPILOT_PLUGIN_VERSION"] ?? "copilot-chat/0.26.7"

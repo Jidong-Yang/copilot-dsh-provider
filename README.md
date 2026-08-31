@@ -1,8 +1,14 @@
-# Copilot DSH Provider
+# Copilot Model Provider
 
-A minimal localhost provider that exposes GitHub Copilot models to DeepSeek Harness through OpenAI-compatible Responses and Chat Completions APIs.
+A minimal localhost provider that exposes GitHub Copilot models to OpenAI Codex
+(CLI and Desktop) and DeepSeek Harness through OpenAI-compatible Responses and
+Chat Completions APIs.
 
-This project deliberately contains no agent loop. DeepSeek Harness owns prompts, sessions, tools, permissions, retries, and durable logs. The provider only performs GitHub authentication, refreshes the short-lived Copilot token, lists compatible models, and otherwise passes Responses or Chat Completions requests and streams through unchanged.
+This project deliberately contains no agent loop. Codex or DeepSeek Harness
+owns prompts, sessions, tools, permissions, retries, and durable logs. The
+provider only performs GitHub authentication, refreshes the short-lived Copilot
+token, lists compatible models, and otherwise passes Responses or Chat
+Completions requests and streams through unchanged.
 
 One wire-compatibility normalization is applied to function tools: when `strict`
 is omitted, the provider sends `strict: false` explicitly. This is the OpenAI
@@ -28,6 +34,54 @@ bun run start
 ```
 
 The server binds only to `127.0.0.1:4141`.
+
+## Configure OpenAI Codex CLI and Desktop
+
+Codex CLI and Desktop share the user-level configuration at
+`~/.codex/config.toml`. Generate the provider block, optionally choosing a
+different default Responses-compatible Copilot model:
+
+```powershell
+bun run codex-config
+# or: bun run codex-config gpt-5.6-terra
+```
+
+Merge the printed TOML into `~/.codex/config.toml`, then keep this provider
+running while using either Codex client. The generated configuration is:
+
+```toml
+model = "gpt-5.6-sol"
+model_provider = "github-copilot"
+model_catalog_json = "C:\\Users\\you\\.copilot-dsh-provider\\codex-models.json"
+
+[model_providers.github-copilot]
+name = "GitHub Copilot"
+base_url = "http://127.0.0.1:4141/codex/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+```
+
+Provider settings must be in the user-level file, not a project-local
+`.codex/config.toml`; Codex intentionally ignores project-local
+`model_provider` and `model_providers` entries. Restart Codex Desktop after
+changing the file. No OpenAI API key is needed because the localhost provider
+owns GitHub authentication.
+
+The model in `codex-config` is only the initial selection. The command writes a
+Codex catalog snapshot containing every Responses-compatible model in the
+authorized Copilot subscription, including its context window, input
+modalities, and reasoning levels. This replaces Codex's bundled picker catalog,
+so unsupported built-in models are not shown. Use the model picker in CLI or
+Desktop to switch models, or override one CLI run with:
+
+```powershell
+codex --model gpt-5.6-terra
+```
+
+Run `bun run codex-config` again whenever the Copilot model catalog changes,
+then restart Codex Desktop. The generated catalog contains model metadata only;
+the GitHub credential remains inside the provider.
 
 ## Configure DeepSeek Harness
 
@@ -60,6 +114,8 @@ Requests are passed through without collapsing conversation content. An image at
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Safe model-authentication readiness |
+| `GET /codex/v1/models` | Dynamic Codex CLI/Desktop model catalog |
+| `POST /codex/v1/responses` | Codex Responses request and stream proxy |
 | `GET /responses/v1/models` | Dynamic Responses-compatible model catalog |
 | `POST /responses/v1/responses` | Transparent Responses request and stream proxy |
 | `GET /chat/v1/models` | Dynamic Chat Completions-compatible model catalog |

@@ -14,6 +14,7 @@ test("serves health without exposing credentials or CORS", async () => {
       })
     },
     models: () => Promise.resolve({ object: "list", data: [] }),
+    codexModels: () => Promise.resolve({ models: [] }),
     response: () => Promise.resolve(new Response()),
     chatCompletion: () => Promise.resolve(new Response()),
   })
@@ -52,6 +53,7 @@ test("passes a Responses request and response through unchanged", async () => {
       }))
     }),
     models: mock(() => Promise.resolve({ object: "list", data: [] })),
+    codexModels: () => Promise.resolve({ models: [] }),
     chatCompletion: () => Promise.resolve(new Response()),
   }
   const handler = createServer(client)
@@ -86,6 +88,7 @@ test("routes protocol-specific model catalogs and Chat Completions", async () =>
   const handler = createServer({
     health: () => Promise.resolve({ status: "ready" }),
     models,
+    codexModels: () => Promise.resolve({ models: [] }),
     response: () => Promise.resolve(new Response()),
     chatCompletion,
   })
@@ -112,4 +115,38 @@ test("routes protocol-specific model catalogs and Chat Completions", async () =>
   expect(await completion.json()).toEqual({ choices: [] })
   expect(models).toHaveBeenCalledTimes(2)
   expect(chatCompletion).toHaveBeenCalledTimes(1)
+})
+
+test("serves Codex Responses aliases", async () => {
+  const codexModels = mock(() => Promise.resolve({
+    models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }],
+  }))
+  const response = mock((payload: unknown) => {
+    expect(payload).toEqual({ model: "gpt-5.6-sol", input: "hello", stream: true })
+    return Promise.resolve(new Response("data: response.completed\n\n", {
+      headers: { "content-type": "text/event-stream" },
+    }))
+  })
+  const handler = createServer({
+    health: () => Promise.resolve({ status: "ready" }),
+    models: () => Promise.resolve({ object: "list", data: [] }),
+    codexModels,
+    response,
+    chatCompletion: () => Promise.resolve(new Response()),
+  })
+
+  const catalog = await handler(new Request("http://localhost/codex/v1/models"))
+  const completion = await handler(new Request("http://localhost/codex/v1/responses", {
+    method: "POST",
+    body: JSON.stringify({ model: "gpt-5.6-sol", input: "hello", stream: true }),
+  }))
+
+  expect(catalog.status).toBe(200)
+  expect(await catalog.json()).toEqual({
+    models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }],
+  })
+  expect(completion.status).toBe(200)
+  expect(await completion.text()).toBe("data: response.completed\n\n")
+  expect(codexModels).toHaveBeenCalledTimes(1)
+  expect(response).toHaveBeenCalledTimes(1)
 })
