@@ -15,6 +15,7 @@ test("serves health without exposing credentials or CORS", async () => {
     },
     models: () => Promise.resolve({ object: "list", data: [] }),
     response: () => Promise.resolve(new Response()),
+    chatCompletion: () => Promise.resolve(new Response()),
   })
   const health = await handler(new Request("http://localhost/health", {
     headers: { origin: "https://example.com" },
@@ -51,6 +52,7 @@ test("passes a Responses request and response through unchanged", async () => {
       }))
     }),
     models: mock(() => Promise.resolve({ object: "list", data: [] })),
+    chatCompletion: () => Promise.resolve(new Response()),
   }
   const handler = createServer(client)
 
@@ -67,4 +69,47 @@ test("passes a Responses request and response through unchanged", async () => {
   expect(response.status).toBe(200)
   expect(response.headers.get("content-type")).toContain("text/event-stream")
   expect(await response.text()).toBe("data: response.completed\n\n")
+})
+
+test("routes protocol-specific model catalogs and Chat Completions", async () => {
+  const models = mock((protocol: "chat-completions" | "responses") =>
+    Promise.resolve({ object: "list", data: [{ id: protocol }] }))
+  const chatCompletion = mock((payload: unknown, signal?: AbortSignal) => {
+    expect(payload).toEqual({
+      model: "gemini-3.7-flash",
+      messages: [{ role: "user", content: "hello" }],
+      reasoning_effort: "high",
+    })
+    expect(signal).toBeInstanceOf(AbortSignal)
+    return Promise.resolve(Response.json({ choices: [] }))
+  })
+  const handler = createServer({
+    health: () => Promise.resolve({ status: "ready" }),
+    models,
+    response: () => Promise.resolve(new Response()),
+    chatCompletion,
+  })
+
+  const responsesModels = await handler(new Request("http://localhost/responses/v1/models"))
+  const chatModels = await handler(new Request("http://localhost/chat/v1/models"))
+  const completion = await handler(new Request("http://localhost/chat/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({
+      model: "gemini-3.7-flash",
+      messages: [{ role: "user", content: "hello" }],
+      reasoning_effort: "high",
+    }),
+  }))
+
+  expect(await responsesModels.json()).toEqual({
+    object: "list",
+    data: [{ id: "responses" }],
+  })
+  expect(await chatModels.json()).toEqual({
+    object: "list",
+    data: [{ id: "chat-completions" }],
+  })
+  expect(await completion.json()).toEqual({ choices: [] })
+  expect(models).toHaveBeenCalledTimes(2)
+  expect(chatCompletion).toHaveBeenCalledTimes(1)
 })

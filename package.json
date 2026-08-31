@@ -6,7 +6,7 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/blackflag0623/copilot-dsh-provider.git"
+    "url": "git+https://github.com/Jidong-Yang/copilot-dsh-provider.git"
   },
   "scripts": {
     "auth": "bun run src/main.ts auth",

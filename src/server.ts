@@ -1,7 +1,10 @@
+import type { CopilotProtocol } from "./copilot.ts"
+
 export interface Provider {
   health: (signal?: AbortSignal) => Promise<object>
-  models: (signal?: AbortSignal) => Promise<object>
+  models: (protocol: CopilotProtocol, signal?: AbortSignal) => Promise<object>
   response: (payload: unknown, signal?: AbortSignal) => Promise<Response>
+  chatCompletion: (payload: unknown, signal?: AbortSignal) => Promise<Response>
 }
 
 export function createServer(client: Provider): (request: Request) => Promise<Response> {
@@ -10,16 +13,21 @@ export function createServer(client: Provider): (request: Request) => Promise<Re
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json(await client.health(request.signal))
     }
-    if (request.method === "GET" && url.pathname === "/v1/models") {
+    const protocol = modelProtocol(url.pathname)
+    if (request.method === "GET" && protocol !== undefined) {
       try {
-        return Response.json(await client.models(request.signal))
+        return Response.json(await client.models(protocol, request.signal))
       } catch (error) {
         return errorResponse(error)
       }
     }
-    if (request.method === "POST" && url.pathname === "/v1/responses") {
+    const operation = responseOperation(url.pathname)
+    if (request.method === "POST" && operation !== undefined) {
       try {
-        const upstream = await client.response(await request.json(), request.signal)
+        const payload = await request.json()
+        const upstream = operation === "responses"
+          ? await client.response(payload, request.signal)
+          : await client.chatCompletion(payload, request.signal)
         return new Response(upstream.body, {
           status: upstream.status,
           statusText: upstream.statusText,
@@ -33,6 +41,20 @@ export function createServer(client: Provider): (request: Request) => Promise<Re
       status: 404,
     })
   }
+}
+
+function modelProtocol(path: string): CopilotProtocol | undefined {
+  if (path === "/v1/models" || path === "/responses/v1/models") return "responses"
+  if (path === "/chat/v1/models") return "chat-completions"
+  return undefined
+}
+
+function responseOperation(path: string): CopilotProtocol | undefined {
+  if (path === "/v1/responses" || path === "/responses/v1/responses") return "responses"
+  if (path === "/v1/chat/completions" || path === "/chat/v1/chat/completions") {
+    return "chat-completions"
+  }
+  return undefined
 }
 
 function errorResponse(error: unknown): Response {
