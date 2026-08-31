@@ -15,6 +15,7 @@ interface CopilotModel {
   supported_endpoints?: string[]
   capabilities?: {
     supports?: {
+      reasoning_effort?: string[]
       vision?: boolean
     }
     limits?: {
@@ -29,6 +30,8 @@ interface ModelsReply {
 }
 
 type GitHubTokenSource = string | (() => Promise<string>)
+
+export type CopilotProtocol = "chat-completions" | "responses"
 
 export interface ModelHealth {
   status: "checking" | "ready" | "reauth-required" | "upstream-unavailable"
@@ -65,7 +68,10 @@ export class CopilotClient {
     return this.modelHealth
   }
 
-  public async models(signal?: AbortSignal): Promise<object> {
+  public async models(
+    protocol: CopilotProtocol = "responses",
+    signal?: AbortSignal,
+  ): Promise<object> {
     const response = await this.requestWithSession(session =>
       fetch(`${session.apiBase}/models`, {
         headers: copilotHeaders(session.token, false),
@@ -77,9 +83,10 @@ export class CopilotClient {
       object: "list",
       data: upstream.data
         .filter(model => model.model_picker_enabled !== false)
-        .filter(supportsResponses)
+        .filter(model => supportsProtocol(model, protocol))
         .map(model => {
           const limits = model.capabilities?.limits
+          const reasoningEfforts = model.capabilities?.supports?.reasoning_effort
           return {
             id: model.id,
             object: "model",
@@ -96,6 +103,9 @@ export class CopilotClient {
             ...(model.capabilities?.supports?.vision === true
               ? { input: ["text", "image"] }
               : {}),
+            ...(reasoningEfforts === undefined
+              ? {}
+              : { reasoning_efforts: normalizeReasoningEfforts(reasoningEfforts) }),
           }
         }),
       has_more: false,
@@ -103,11 +113,23 @@ export class CopilotClient {
   }
 
   public async response(payload: unknown, signal?: AbortSignal): Promise<Response> {
+    return await this.request("responses", withExplicitNonStrictTools(payload), signal)
+  }
+
+  public async chatCompletion(payload: unknown, signal?: AbortSignal): Promise<Response> {
+    return await this.request("chat/completions", payload, signal)
+  }
+
+  private async request(
+    path: "chat/completions" | "responses",
+    payload: unknown,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     return await this.requestWithSession(session =>
-      fetch(`${session.apiBase}/responses`, {
+      fetch(`${session.apiBase}/${path}`, {
         method: "POST",
         headers: copilotHeaders(session.token, hasAgentInput(payload)),
-        body: JSON.stringify(withExplicitNonStrictTools(payload)),
+        body: JSON.stringify(payload),
         signal,
       }))
   }
@@ -232,15 +254,25 @@ export class CopilotClient {
   }
 }
 
-function supportsResponses(model: CopilotModel): boolean {
-  if (model.supported_endpoints === undefined) return true
+function supportsProtocol(model: CopilotModel, protocol: CopilotProtocol): boolean {
+  if (model.supported_endpoints === undefined) return protocol === "responses"
+  const suffix = protocol === "responses" ? "/responses" : "/chat/completions"
   return model.supported_endpoints.some(endpoint =>
-    endpoint === "responses" || endpoint.endsWith("/responses"))
+    endpoint === suffix.slice(1) || endpoint.endsWith(suffix))
+}
+
+function normalizeReasoningEfforts(efforts: readonly string[]): Record<string, string> {
+  return Object.fromEntries(efforts.map(effort => [
+    effort === "none" ? "off" : effort,
+    effort,
+  ]))
 }
 
 function hasAgentInput(payload: unknown): boolean {
-  if (!isRecord(payload) || !Array.isArray(payload["input"])) return false
-  return payload["input"].some(item => isRecord(item)
+  if (!isRecord(payload)) return false
+  const input = Array.isArray(payload["input"]) ? payload["input"] : []
+  const messages = Array.isArray(payload["messages"]) ? payload["messages"] : []
+  return [...input, ...messages].some(item => isRecord(item)
     && (item["role"] === "assistant"
       || item["role"] === "tool"
       || item["type"] === "function_call"

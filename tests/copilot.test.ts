@@ -8,7 +8,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-test("lists only Responses-compatible models with reported capacities", async () => {
+test("lists protocol-compatible models with capabilities reported by Copilot", async () => {
   const fetchMock = mock((url: string) => {
     if (url === "https://api.github.com/copilot_internal/v2/token") {
       return Promise.resolve(Response.json({
@@ -26,7 +26,10 @@ test("lists only Responses-compatible models with reported capacities", async ()
             vendor: "OpenAI",
             supported_endpoints: ["responses"],
             capabilities: {
-              supports: { vision: true },
+              supports: {
+                reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+                vision: true,
+              },
               limits: {
                 max_context_window_tokens: 1_050_000,
                 max_output_tokens: 128_000,
@@ -34,8 +37,20 @@ test("lists only Responses-compatible models with reported capacities", async ()
             },
           },
           {
-            id: "legacy-chat",
+            id: "gemini-3.7-flash",
+            name: "Gemini 3.7 Flash",
+            model_picker_enabled: true,
             supported_endpoints: ["chat/completions"],
+            capabilities: {
+              supports: {
+                reasoning_effort: ["low", "medium", "high"],
+                vision: true,
+              },
+              limits: {
+                max_context_window_tokens: 1_000_000,
+                max_output_tokens: 64_000,
+              },
+            },
           },
         ],
       }))
@@ -44,9 +59,11 @@ test("lists only Responses-compatible models with reported capacities", async ()
   })
   globalThis.fetch = fetchMock as unknown as typeof fetch
 
-  const result = await new CopilotClient("github-token").models()
+  const client = new CopilotClient("github-token")
+  const responses = await client.models("responses")
+  const chat = await client.models("chat-completions")
 
-  expect(result).toEqual({
+  expect(responses).toEqual({
     object: "list",
     data: [{
       id: "gpt-5.6-sol",
@@ -58,6 +75,34 @@ test("lists only Responses-compatible models with reported capacities", async ()
       context_window: 1_050_000,
       max_output_tokens: 128_000,
       input: ["text", "image"],
+      reasoning_efforts: {
+        off: "none",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: "max",
+      },
+    }],
+    has_more: false,
+  })
+  expect(chat).toEqual({
+    object: "list",
+    data: [{
+      id: "gemini-3.7-flash",
+      object: "model",
+      type: "model",
+      created: 0,
+      owned_by: "GitHub Copilot",
+      display_name: "Gemini 3.7 Flash",
+      context_window: 1_000_000,
+      max_output_tokens: 64_000,
+      input: ["text", "image"],
+      reasoning_efforts: {
+        low: "low",
+        medium: "medium",
+        high: "high",
+      },
     }],
     has_more: false,
   })
@@ -131,6 +176,7 @@ test("preserves explicit strict modes and non-tool Responses payloads", async ()
     requests.push(JSON.parse(init.body))
     return Promise.resolve(new Response("data: response.completed\n\n"))
   })
+
   globalThis.fetch = fetchMock as unknown as typeof fetch
   const client = new CopilotClient("github-token")
   const strictTools = {
@@ -157,6 +203,50 @@ test("preserves explicit strict modes and non-tool Responses payloads", async ()
   await client.response(imageInput)
 
   expect(requests).toEqual([strictTools, imageInput])
+})
+
+test("passes Chat Completions reasoning and images from every turn unchanged", async () => {
+  const payload = {
+    model: "gemini-3.7-flash",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "First image" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ],
+      },
+      { role: "assistant", content: "Seen" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Second image" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,BBBB" } },
+        ],
+      },
+    ],
+    reasoning_effort: "high",
+    stream: true,
+  }
+  const fetchMock = mock((url: string, init?: RequestInit) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      return Promise.resolve(Response.json({
+        token: "session-token",
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    expect(url).toBe("https://api.githubcopilot.com/chat/completions")
+    expect(new Headers(init?.headers).get("x-initiator")).toBe("agent")
+    if (typeof init?.body !== "string") throw new Error("Expected JSON request body")
+    expect(JSON.parse(init.body)).toEqual(payload)
+    return Promise.resolve(new Response("data: [DONE]\n\n"))
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+
+  const response = await new CopilotClient("github-token").chatCompletion(payload)
+
+  expect(await response.text()).toBe("data: [DONE]\n\n")
 })
 
 test("shares one token exchange across concurrent first requests", async () => {
