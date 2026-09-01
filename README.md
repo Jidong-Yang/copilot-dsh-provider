@@ -17,15 +17,46 @@ models to populate optional tool properties as if they were required. Explicit
 `strict` values, JSON Schemas, tool arguments, call IDs, results, and stream
 events are preserved.
 
-The short-lived Copilot token refreshes automatically. After a new Device Flow
-authorization is saved, the running provider reloads the GitHub token on the
-next token exchange; an upstream 401 or 403 triggers one immediate reload and
-retry, so restarting the provider is not required.
+The short-lived Copilot token refreshes automatically. Device Flow requests
+GitHub's `offline_access` scope; when GitHub issues expiring credentials, the
+access and refresh tokens are stored locally and rotated before expiry, so
+routine expiry does not require another interactive login. GitHub environments
+that return a non-expiring token without a refresh token remain supported, as
+do legacy installations with a plain-text `github-token` file. After a new
+Device Flow authorization is saved, the running provider reloads the GitHub
+credential on the next token exchange; an upstream authorization failure
+triggers one immediate reload and retry, so restarting is not required.
 
 > [!WARNING]
 > GitHub does not document or support the Copilot inference endpoints used here. They can change without notice, and automated use can trigger rate limits or account restrictions.
 
-## Run
+## One-step Windows setup
+
+From PowerShell, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\setup.ps1
+```
+
+The idempotent setup installs Bun for the current user when needed, installs
+project dependencies, reuses a healthy GitHub credential or runs Device Flow
+authentication, and registers the provider as the `Copilot DSH Provider` Task
+Scheduler task. The task starts at login with highest privileges in a visible
+PowerShell 7 window, runs only as the current user, and restarts after failures.
+The window is titled `Copilot DSH Provider` and shows provider output for
+debugging. Running `setup.ps1` again updates and restarts the task without
+creating duplicates. Use `-ForceAuth` to replace an otherwise healthy
+credential; its setup window displays the Device Flow URL and code.
+
+To inspect or remove the task:
+
+```powershell
+Get-ScheduledTask -TaskName "Copilot DSH Provider"
+Unregister-ScheduledTask -TaskName "Copilot DSH Provider" -Confirm:$false
+```
+
+## Run manually
 
 ```powershell
 bun install

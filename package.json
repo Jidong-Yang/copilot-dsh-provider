@@ -10,6 +10,7 @@
   },
   "scripts": {
     "auth": "bun run src/main.ts auth",
+    "auth-status": "bun run src/main.ts auth-status",
     "codex-config": "bun run src/main.ts codex-config",
     "start": "bun run src/main.ts start",
     "test": "bun test",

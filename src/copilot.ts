@@ -1,4 +1,5 @@
 import { copilotHeaders, githubHeaders } from "./config.ts"
+import { GitHubCredentialUnavailableError } from "./auth.ts"
 
 interface SessionTokenReply {
   expires_at: number
@@ -40,7 +41,7 @@ const CODEX_BASE_INSTRUCTIONS = [
   "In the final response, concisely state the result and any genuine limitation.",
 ].join(" ")
 
-type GitHubTokenSource = string | (() => Promise<string>)
+type GitHubTokenSource = string | ((forceRefresh?: boolean) => Promise<string>)
 
 export type CopilotProtocol = "chat-completions" | "responses"
 
@@ -256,33 +257,67 @@ export class CopilotClient {
     try {
       githubToken = typeof this.githubTokenSource === "string"
         ? this.githubTokenSource
-        : await this.githubTokenSource()
+        : await this.githubTokenSource(false)
     } catch (error) {
-      this.setHealth("reauth-required", "github-credential-rejected")
+      this.classifyCredentialError(error)
       throw error
     }
     let reply: SessionTokenReply
     try {
-      reply = await retry(async () => {
-        const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
-          headers: githubHeaders(githubToken),
-        })
-        if (!response.ok) throw new RetryableHttpError(response)
-        return await response.json() as SessionTokenReply
-      })
+      reply = await this.exchangeWithGitHubToken(githubToken)
     } catch (error) {
-      if (error instanceof RetryableHttpError && [401, 403].includes(error.response.status)) {
-        this.setHealth(
-          "reauth-required",
-          error.response.status === 401
-            ? "github-credential-rejected"
-            : "copilot-access-rejected",
-        )
-      } else {
-        this.setHealth("upstream-unavailable", "upstream-unavailable")
+      if (
+        error instanceof RetryableHttpError
+        && error.response.status === 401
+        && typeof this.githubTokenSource !== "string"
+      ) {
+        try {
+          const refreshedToken = await this.githubTokenSource(true)
+          if (refreshedToken !== githubToken) {
+            reply = await this.exchangeWithGitHubToken(refreshedToken)
+            return this.acceptSessionToken(reply)
+          }
+        } catch (refreshError) {
+          this.classifyCredentialError(refreshError)
+          throw refreshError
+        }
       }
+      this.classifyCredentialError(error)
       throw error
     }
+    return this.acceptSessionToken(reply)
+  }
+
+  private async exchangeWithGitHubToken(githubToken: string): Promise<SessionTokenReply> {
+    return await retry(async () => {
+      let response: Response
+      try {
+        response = await fetch("https://api.github.com/copilot_internal/v2/token", {
+          headers: githubHeaders(githubToken),
+        })
+      } catch (error) {
+        throw new GitHubCredentialUnavailableError(
+          "Copilot token exchange request failed",
+          { cause: error },
+        )
+      }
+      if (!response.ok) throw new RetryableHttpError(response)
+      try {
+        return await response.json() as SessionTokenReply
+      } catch (error) {
+        throw new GitHubCredentialUnavailableError(
+          "Copilot token exchange returned an invalid response",
+          { cause: error },
+        )
+      }
+    })
+  }
+
+  private acceptSessionToken(reply: SessionTokenReply): {
+    token: string
+    expiresAt: number
+    apiBase: string
+  } {
     const apiBase = reply.endpoints?.api?.replace(/\/+$/, "")
       ?? "https://api.githubcopilot.com"
     const session = {
@@ -293,6 +328,21 @@ export class CopilotClient {
     this.session = session
     this.setHealth("ready")
     return session
+  }
+
+  private classifyCredentialError(error: unknown): void {
+    if (error instanceof GitHubCredentialUnavailableError) {
+      this.setHealth("upstream-unavailable", "upstream-unavailable")
+    } else if (error instanceof RetryableHttpError && error.response.status === 403) {
+      this.setHealth("reauth-required", "copilot-access-rejected")
+    } else if (
+      error instanceof RetryableHttpError
+      && ![401, 403].includes(error.response.status)
+    ) {
+      this.setHealth("upstream-unavailable", "upstream-unavailable")
+    } else {
+      this.setHealth("reauth-required", "github-credential-rejected")
+    }
   }
 
   private setHealth(

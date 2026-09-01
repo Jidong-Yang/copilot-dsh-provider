@@ -11,6 +11,11 @@ const [command = "start", argument] = process.argv.slice(2)
 
 if (command === "auth") {
   await authenticate()
+} else if (command === "auth-status") {
+  const client = new CopilotClient(readGitHubToken)
+  const health = await client.health()
+  console.log(JSON.stringify(health))
+  if (health.status !== "ready") process.exitCode = health.status === "reauth-required" ? 2 : 3
 } else if (command === "codex-config") {
   const port = providerPort()
   const model = argument?.trim() || "gpt-5.6-sol"

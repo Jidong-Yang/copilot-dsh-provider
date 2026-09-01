@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test"
 
+import { GitHubCredentialUnavailableError } from "../src/auth.ts"
 import { CopilotClient } from "../src/copilot.ts"
 
 const originalFetch = globalThis.fetch
@@ -368,6 +369,72 @@ test("surfaces a rejected GitHub credential without exposing the upstream body",
     code: "github-credential-rejected",
   })
   expect(JSON.stringify(await client.health())).not.toContain("sensitive")
+})
+
+test("force-refreshes the GitHub credential when session exchange rejects it", async () => {
+  const tokenReads: boolean[] = []
+  const fetchMock = mock((url: string, init?: RequestInit) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      const authorization = new Headers(init?.headers).get("authorization")
+      return Promise.resolve(authorization === "token expired-github-token"
+        ? new Response("expired", { status: 401 })
+        : Response.json({
+            token: "session-token",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            refresh_in: 1500,
+          }))
+    }
+    if (url === "https://api.githubcopilot.com/models") {
+      return Promise.resolve(Response.json({ data: [] }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient((forceRefresh = false) => {
+    tokenReads.push(forceRefresh)
+    return Promise.resolve(forceRefresh ? "refreshed-github-token" : "expired-github-token")
+  })
+
+  expect(await client.models()).toEqual({ object: "list", data: [], has_more: false })
+  expect(tokenReads).toEqual([false, true])
+  expect(await client.health()).toMatchObject({ status: "ready" })
+})
+
+test("reports reauthentication when a forced GitHub credential refresh fails", async () => {
+  const fetchMock = mock(() =>
+    Promise.resolve(new Response("expired", { status: 401 })))
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient((forceRefresh = false) => {
+    if (forceRefresh) throw new Error("refresh credential expired")
+    return Promise.resolve("expired-github-token")
+  })
+
+  expect(await client.health()).toMatchObject({
+    status: "reauth-required",
+    code: "github-credential-rejected",
+  })
+})
+
+test("reports upstream unavailable when proactive credential refresh cannot connect", async () => {
+  const client = new CopilotClient(() => {
+    throw new GitHubCredentialUnavailableError("GitHub token refresh request failed")
+  })
+
+  expect(await client.health()).toMatchObject({
+    status: "upstream-unavailable",
+    code: "upstream-unavailable",
+  })
+})
+
+test("reports upstream unavailable when Copilot token exchange cannot connect", async () => {
+  globalThis.fetch = mock(() =>
+    Promise.reject(new TypeError("connection failed"))) as unknown as typeof fetch
+  const client = new CopilotClient("healthy-github-token")
+
+  expect(await client.health()).toMatchObject({
+    status: "upstream-unavailable",
+    code: "upstream-unavailable",
+  })
 })
 
 test("surfaces and revalidates Copilot API availability with a cached session", async () => {
