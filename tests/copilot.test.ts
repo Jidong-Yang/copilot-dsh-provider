@@ -358,6 +358,42 @@ test("reloads the GitHub token and retries once after an authorization failure",
   expect(responses).toBe(2)
 })
 
+test("keeps a non-transient recovery failure generic", async () => {
+  let exchanges = 0
+  const fetchMock = mock((url: string) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      exchanges += 1
+      return Promise.resolve(exchanges === 1
+        ? Response.json({
+            token: "session-token",
+            expires_at: Math.floor(Date.now() / 1000) + 3600,
+            refresh_in: 1500,
+          })
+        : new Response("private bad request", {
+            status: 400,
+            headers: { "retry-after": "12" },
+          }))
+    }
+    if (url === "https://api.githubcopilot.com/responses") {
+      return Promise.resolve(new Response("expired", { status: 401 }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+
+  const failure = await client.response({ input: "hello" }).then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+
+  expect(failure).toMatchObject({
+    message: "Copilot token exchange failed (400)",
+    failureCode: undefined,
+    retryAfter: undefined,
+  })
+})
+
 test("surfaces a rejected GitHub credential without exposing the upstream body", async () => {
   const fetchMock = mock(() =>
     Promise.resolve(new Response("sensitive upstream detail", { status: 401 })))
@@ -437,6 +473,32 @@ test("reports upstream unavailable when Copilot token exchange cannot connect", 
   })
 })
 
+test("classifies a non-transient token failure as a generic provider failure", async () => {
+  globalThis.fetch = mock(() => Promise.resolve(new Response(
+    "private bad request",
+    {
+      status: 400,
+      headers: { "retry-after": "12" },
+    },
+  ))) as unknown as typeof fetch
+  const client = new CopilotClient("healthy-github-token")
+
+  const failure = await client.models().then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+
+  expect(failure).toMatchObject({
+    message: "Copilot token exchange failed (400)",
+    failureCode: undefined,
+    retryAfter: undefined,
+  })
+  expect(await client.health()).toMatchObject({
+    status: "upstream-unavailable",
+    code: "upstream-unavailable",
+  })
+})
+
 test("surfaces and revalidates Copilot API availability with a cached session", async () => {
   let modelRequests = 0
   const fetchMock = mock((url: string) => {
@@ -450,7 +512,13 @@ test("surfaces and revalidates Copilot API availability with a cached session", 
     if (url === "https://api.githubcopilot.com/models") {
       modelRequests += 1
       return Promise.resolve(modelRequests === 1
-        ? new Response("unavailable", { status: 503 })
+        ? new Response("sensitive upstream detail", {
+            status: 503,
+            headers: {
+              "retry-after": "19",
+              "x-upstream-secret": "do-not-forward",
+            },
+          })
         : Response.json({ data: [] }))
     }
     throw new Error(`Unexpected URL: ${url}`)
@@ -458,9 +526,51 @@ test("surfaces and revalidates Copilot API availability with a cached session", 
   globalThis.fetch = fetchMock as unknown as typeof fetch
   const client = new CopilotClient("github-token")
 
-  await expect(client.models()).rejects.toThrow("Copilot request failed (503)")
+  const failure = await client.models().then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+  expect(failure).toMatchObject({
+    message: "Copilot request failed (503)",
+    failureCode: "upstream-unavailable",
+    retryAfter: "19",
+  })
+  expect(JSON.stringify(failure)).not.toContain("sensitive")
+  expect(JSON.stringify(failure)).not.toContain("do-not-forward")
   expect(await client.health()).toMatchObject({ status: "ready" })
   expect(modelRequests).toBe(2)
+})
+
+test("classifies a non-transient model failure as a generic provider failure", async () => {
+  const fetchMock = mock((url: string) => {
+    if (url === "https://api.github.com/copilot_internal/v2/token") {
+      return Promise.resolve(Response.json({
+        token: "session-token",
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_in: 1500,
+      }))
+    }
+    if (url === "https://api.githubcopilot.com/models") {
+      return Promise.resolve(new Response("private bad request", {
+        status: 400,
+        headers: { "retry-after": "12" },
+      }))
+    }
+    throw new Error(`Unexpected URL: ${url}`)
+  })
+  globalThis.fetch = fetchMock as unknown as typeof fetch
+  const client = new CopilotClient("github-token")
+
+  const failure = await client.models().then(
+    () => undefined,
+    (error: unknown) => error,
+  )
+
+  expect(failure).toMatchObject({
+    message: "Copilot request failed (400)",
+    failureCode: undefined,
+    retryAfter: undefined,
+  })
 })
 
 test("refreshes after an authorization failure during health revalidation", async () => {

@@ -116,6 +116,28 @@ test("reports an unavailable upstream for a malformed refresh response", async (
   })
 })
 
+test("retains only a valid Retry-After value from a transient refresh failure", async () => {
+  const path = await credentialPath()
+  await writeFile(path, JSON.stringify({
+    version: 1,
+    accessToken: "expired-access",
+    expiresAt: Date.now() - 1000,
+    refreshToken: "refresh-token",
+  }))
+  globalThis.fetch = mock(() => Promise.resolve(new Response("private failure body", {
+    status: 503,
+    headers: {
+      "retry-after": "41",
+      "x-private-header": "private-value",
+    },
+  }))) as unknown as typeof fetch
+
+  await expect(readGitHubTokenFrom(path)).rejects.toMatchObject({
+    message: "GitHub token refresh failed (503)",
+    retryAfter: "41",
+  })
+})
+
 async function credentialPath(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "copilot-dsh-auth-"))
   temporaryDirectories.push(directory)

@@ -1,5 +1,12 @@
 import { copilotHeaders, githubHeaders } from "./config.ts"
 import { GitHubCredentialUnavailableError } from "./auth.ts"
+import {
+  classifyProviderError,
+  failureCodeFrom,
+  ProviderRequestError,
+  validRetryAfter,
+} from "./errors.ts"
+import type { ProviderFailureCode } from "./errors.ts"
 
 interface SessionTokenReply {
   expires_at: number
@@ -207,7 +214,7 @@ export class CopilotClient {
       response = await request(session)
     } catch (error) {
       this.setHealth("upstream-unavailable", "upstream-unavailable")
-      throw error
+      throw classifyProviderError(error, "upstream-unavailable")
     }
     if (![401, 403].includes(response.status)) {
       this.observeResponse(response)
@@ -225,7 +232,8 @@ export class CopilotClient {
       if (this.modelHealth.status !== "reauth-required") {
         this.setHealth("upstream-unavailable", "upstream-unavailable")
       }
-      throw error
+      if (error instanceof ProviderRequestError) throw error
+      throw classifyProviderError(error, "upstream-unavailable")
     }
     if ([401, 403].includes(retried.status)) {
       if (this.session === retrySession) this.session = undefined
@@ -259,8 +267,7 @@ export class CopilotClient {
         ? this.githubTokenSource
         : await this.githubTokenSource(false)
     } catch (error) {
-      this.classifyCredentialError(error)
-      throw error
+      throw this.classifyCredentialError(error)
     }
     let reply: SessionTokenReply
     try {
@@ -278,12 +285,10 @@ export class CopilotClient {
             return this.acceptSessionToken(reply)
           }
         } catch (refreshError) {
-          this.classifyCredentialError(refreshError)
-          throw refreshError
+          throw this.classifyCredentialError(refreshError)
         }
       }
-      this.classifyCredentialError(error)
-      throw error
+      throw this.classifyCredentialError(error)
     }
     return this.acceptSessionToken(reply)
   }
@@ -330,19 +335,22 @@ export class CopilotClient {
     return session
   }
 
-  private classifyCredentialError(error: unknown): void {
-    if (error instanceof GitHubCredentialUnavailableError) {
+  private classifyCredentialError(error: unknown): ProviderRequestError {
+    const explicitFailureCode = failureCodeFrom(error)
+    if (error instanceof ProviderRequestError && explicitFailureCode === undefined) {
       this.setHealth("upstream-unavailable", "upstream-unavailable")
-    } else if (error instanceof RetryableHttpError && error.response.status === 403) {
-      this.setHealth("reauth-required", "copilot-access-rejected")
-    } else if (
-      error instanceof RetryableHttpError
-      && ![401, 403].includes(error.response.status)
-    ) {
-      this.setHealth("upstream-unavailable", "upstream-unavailable")
-    } else {
-      this.setHealth("reauth-required", "github-credential-rejected")
+      return error
     }
+    const failureCode = explicitFailureCode
+      ?? (error instanceof GitHubCredentialUnavailableError
+        ? "upstream-unavailable"
+        : "github-credential-rejected")
+    if (failureCode === "upstream-unavailable") {
+      this.setHealth("upstream-unavailable", failureCode)
+    } else {
+      this.setHealth("reauth-required", failureCode)
+    }
+    return classifyProviderError(error, failureCode)
   }
 
   private setHealth(
@@ -417,9 +425,20 @@ function withExplicitNonStrictTools(payload: unknown): unknown {
   return changed ? { ...payload, tools } : payload
 }
 
-class RetryableHttpError extends Error {
+class RetryableHttpError extends ProviderRequestError {
   public constructor(public readonly response: Response) {
-    super(`Copilot token exchange failed (${response.status})`)
+    const transient = response.status === 429 || response.status >= 500
+    const failureCode: ProviderFailureCode | undefined = response.status === 403
+      ? "copilot-access-rejected"
+      : response.status === 401
+        ? "github-credential-rejected"
+        : transient
+          ? "upstream-unavailable"
+          : undefined
+    super(`Copilot token exchange failed (${response.status})`, {
+      ...(failureCode === undefined ? {} : { failureCode }),
+      ...(transient ? { retryAfter: validRetryAfter(response) } : {}),
+    })
   }
 }
 
@@ -439,5 +458,16 @@ async function retry<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 async function passthroughError(response: Response): Promise<never> {
-  throw new Error(`Copilot request failed (${response.status}): ${await response.text()}`)
+  const transient = response.status === 429 || response.status >= 500
+  const failureCode: ProviderFailureCode | undefined = response.status === 401
+    || response.status === 403
+    ? "copilot-access-rejected"
+    : transient
+      ? "upstream-unavailable"
+      : undefined
+  await response.body?.cancel()
+  throw new ProviderRequestError(`Copilot request failed (${response.status})`, {
+    ...(failureCode === undefined ? {} : { failureCode }),
+    ...(transient ? { retryAfter: validRetryAfter(response) } : {}),
+  })
 }

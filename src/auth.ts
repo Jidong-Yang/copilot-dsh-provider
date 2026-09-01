@@ -2,6 +2,11 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 
 import { GITHUB_CLIENT_ID, TOKEN_PATH } from "./config.ts"
+import {
+  ProviderRequestError,
+  validRetryAfter,
+} from "./errors.ts"
+import type { ProviderErrorOptions } from "./errors.ts"
 
 interface DeviceCode {
   device_code: string
@@ -31,7 +36,11 @@ interface StoredCredential {
 const EXPIRY_SKEW_MS = 60_000
 const pendingRefreshes = new Map<string, Promise<string>>()
 
-export class GitHubCredentialUnavailableError extends Error {}
+export class GitHubCredentialUnavailableError extends ProviderRequestError {
+  public constructor(message: string, options?: ProviderErrorOptions) {
+    super(message, { ...options, failureCode: "upstream-unavailable" })
+  }
+}
 
 export async function readGitHubToken(forceRefresh = false): Promise<string> {
   const environmentToken = process.env["COPILOT_GITHUB_TOKEN"]
@@ -165,8 +174,11 @@ async function refreshStoredCredential(
   }
   if (!response.ok) {
     if (response.status === 429 || response.status >= 500) {
+      const retryAfter = validRetryAfter(response)
+      await response.body?.cancel()
       throw new GitHubCredentialUnavailableError(
         `GitHub token refresh failed (${response.status})`,
+        { retryAfter },
       )
     }
     throw new Error(`GitHub token refresh rejected (${response.status}); run "bun run auth"`)
