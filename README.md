@@ -49,6 +49,11 @@ debugging. Running `setup.ps1` again updates and restarts the task without
 creating duplicates. Use `-ForceAuth` to replace an otherwise healthy
 credential; its setup window displays the Device Flow URL and code.
 
+The scheduled task only starts the localhost provider. It does not run
+`codex-config`, regenerate Codex's model catalog snapshot, or force connected
+clients to reload their available-model lists. Restarting the task therefore
+does not by itself refresh the models shown by Codex or DeepSeek Harness.
+
 To inspect or remove the task:
 
 ```powershell
@@ -111,8 +116,9 @@ codex --model gpt-5.6-terra
 ```
 
 Run `bun run codex-config` again whenever the Copilot model catalog changes,
-then restart Codex Desktop. The generated catalog contains model metadata only;
-the GitHub credential remains inside the provider.
+then restart Codex Desktop or start a new Codex CLI process so it reloads the
+generated catalog. The generated catalog contains model metadata only; the
+GitHub credential remains inside the provider.
 
 ## Configure DeepSeek Harness
 
@@ -136,7 +142,18 @@ Add a second custom provider for models that Copilot serves only through Chat Co
 | API protocol | `openai-completions` |
 | API key | Any non-secret placeholder, such as `local-copilot-provider` |
 
-Use **Fetch available models** on each route, choose the models to expose, and save. The protocol-specific catalogs include context and output limits, `input: [text, image]` for models whose Copilot metadata declares vision, and `reasoning_efforts` with the exact selectable levels and wire spellings Copilot reports. Current Harness model discovery keeps only names and capacities, so copy `input` to the model entry's `input` field and `reasoning_efforts` to `reasoningEfforts` in `settings.yaml` until its Models UI preserves these extensions.
+Use **Fetch available models** on each route, choose the models to expose, and
+save. When the Copilot catalog changes, make sure the scheduled provider is
+running, use **Fetch available models** again on both routes, and restart
+DeepSeek Harness if the running client still shows its previously cached list.
+Restarting only the scheduled task is not sufficient because Harness controls
+when model discovery is repeated. The protocol-specific catalogs include
+context and output limits, `input: [text, image]` for models whose Copilot
+metadata declares vision, and `reasoning_efforts` with the exact selectable
+levels and wire spellings Copilot reports. Current Harness model discovery
+keeps only names and capacities, so copy `input` to the model entry's `input`
+field and `reasoning_efforts` to `reasoningEfforts` in `settings.yaml` until
+its Models UI preserves these extensions.
 
 Requests are passed through without collapsing conversation content. An image attached on any turn remains in that turn's Responses `input_image` or Chat Completions `image_url` content, and the selected thinking level remains in `reasoning.effort` or `reasoning_effort` respectively.
 
