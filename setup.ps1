@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = "Copilot DSH Provider",
-    [switch]$ForceAuth
+    [switch]$ForceAuth,
+    [switch]$InstallOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,8 +29,20 @@ function Test-IsAdministrator {
     )
 }
 
+$manifestPath = Join-Path $projectRoot "package.json"
+foreach ($requiredPath in @($manifestPath, (Join-Path $projectRoot "bun.lock"), (Join-Path $projectRoot "src/main.ts"))) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Required provider artifact is missing: $requiredPath"
+    }
+}
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($manifest.name -cne "copilot-dsh-provider" -or $manifest.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+    throw "Unexpected provider package identity or version."
+}
+Write-Host "Preparing $($manifest.name) version $($manifest.version)."
+
 $pwsh = Resolve-PowerShell7
-if (-not (Test-IsAdministrator)) {
+if (-not $InstallOnly -and -not (Test-IsAdministrator)) {
     Write-Host "Requesting elevation to register the visible startup task..."
     $arguments = @(
         "-NoLogo",
@@ -123,6 +136,11 @@ try {
         if ($status.Health.status -ne "ready") {
             throw "The new GitHub credential could not access GitHub Copilot."
         }
+    }
+
+    if ($InstallOnly) {
+        Write-Host "Install-only preparation complete. No Scheduled Task or process was changed."
+        return
     }
 
     Write-Host "Registering Task Scheduler task '$TaskName'..."
