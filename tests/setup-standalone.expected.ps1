@@ -1,39 +1,3 @@
-[CmdletBinding()]
-param(
-    [string]$TaskName = "Copilot DSH Provider",
-    [switch]$ForceAuth,
-    [switch]$InstallOnly
-)
-
-$ErrorActionPreference = "Stop"
-Set-StrictMode -Version Latest
-
-$projectRoot = $PSScriptRoot
-if (-not $projectRoot) {
-    throw "Unable to determine the project directory."
-}
-
-if ($InstallOnly) {
-    & (Join-Path $projectRoot "setup-install-only.ps1") -ForceAuth:$ForceAuth
-    return
-}
-
-function Resolve-PowerShell7 {
-    $command = Get-Command pwsh -ErrorAction SilentlyContinue
-    if (-not $command) {
-        throw "PowerShell 7 is required. Install it from https://aka.ms/powershell-release?tag=stable."
-    }
-    return $command.Source
-}
-
-function Test-IsAdministrator {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
-    return $principal.IsInRole(
-        [System.Security.Principal.WindowsBuiltInRole]::Administrator
-    )
-}
-
 $pwsh = Resolve-PowerShell7
 if (-not (Test-IsAdministrator)) {
     Write-Host "Requesting elevation to register the visible startup task..."
