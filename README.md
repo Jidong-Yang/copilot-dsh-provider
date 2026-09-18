@@ -54,7 +54,28 @@ The scheduled task only starts the localhost provider. It does not run
 clients to reload their available-model lists. Restarting the task therefore
 does not by itself refresh the models shown by Codex or DeepSeek Harness.
 
-To inspect or remove the task:
+### Install/update-only preparation
+
+An external process manager can prepare the component without taking over its
+startup lifecycle:
+
+```powershell
+.\setup.ps1 -InstallOnly
+```
+
+This mode verifies the package identity, version, lockfile, and source entrypoint,
+then performs the same Bun, locked dependency, and authentication preparation. It
+does not request elevation or inspect, register, unregister, start, stop, restart,
+or terminate a Scheduled Task or process. `-ForceAuth` remains available when an
+explicit credential replacement is intended. Omitting `-InstallOnly` preserves
+the standalone task setup above.
+
+The managed Watchdog handoff and startup registration are not delivered by this
+repository or command. Until that separate handoff is completed, `-InstallOnly`
+does not opt a machine into Watchdog management and does not change an existing
+standalone task or provider process.
+
+To inspect or remove the standalone task:
 
 ```powershell
 Get-ScheduledTask -TaskName "Copilot DSH Provider"
@@ -209,6 +230,7 @@ body.
 ## Checks
 
 ```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File tests/setup.test.ps1
 bun test
 bun run typecheck
 bun run build
