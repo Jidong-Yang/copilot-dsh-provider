@@ -183,6 +183,7 @@ Requests are passed through without collapsing conversation content. An image at
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Safe model-authentication readiness |
+| `GET /health/version` | Local process readiness and exact build identity, without model authentication |
 | `GET /codex/v1/models` | Dynamic Codex CLI/Desktop model catalog |
 | `POST /codex/v1/responses` | Codex Responses request and stream proxy |
 | `GET /responses/v1/models` | Dynamic Responses-compatible model catalog |
@@ -226,6 +227,23 @@ returns one of `checking`, `ready`, `reauth-required`, or
 `upstream-unavailable`. It exposes only a safe code and observation timestamp;
 it never returns a token, GitHub login, credential path, or upstream error
 body.
+
+`GET /health/version` returns exactly `schemaVersion: 1`, `status: "ready"`,
+`repository: "Jidong-Yang/copilot-dsh-provider"`, the package `version`, and the
+40-character Git `revision`. It does not contact GitHub or read credentials;
+`ready` means this local HTTP process can serve its verified build identity,
+not that model authentication or inference succeeded. Use `/health` for that
+separate authentication check.
+
+Build or start from a clean Provider Git checkout. A Bun macro captures its
+package version and HEAD at build/transpile time, including when using
+`bun build src/main.ts --target=bun --packages=bundle --outdir=dist`.
+The resulting bundle retains that identity outside the checkout without Git,
+environment-supplied revision overrides, or additional deployment files.
+Dirty, missing, or enclosing-only Git metadata yields HTTP `503` with code
+`build-identity-unavailable` and a safe diagnostic, never a guessed identity.
+Other routes remain available. Commit source changes before building an
+artifact intended to pass version readiness.
 
 ## Checks
 
