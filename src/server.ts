@@ -1,5 +1,8 @@
 import type { CopilotProtocol } from "./copilot.ts"
 import { failureCodeFrom, retryAfterFrom } from "./errors.ts"
+import { buildIdentity } from "./build-identity.ts" with { type: "macro" }
+
+const identity = buildIdentity()
 
 export interface Provider {
   health: (signal?: AbortSignal) => Promise<object>
@@ -12,6 +15,24 @@ export interface Provider {
 export function createServer(client: Provider): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url)
+    if (request.method === "GET" && url.pathname === "/health/version") {
+      if (identity === null) {
+        return Response.json({
+          error: {
+            message: "Provider build identity is unavailable.",
+            type: "provider_error",
+            code: "build-identity-unavailable",
+          },
+        }, { status: 503 })
+      }
+      return Response.json({
+        schemaVersion: 1,
+        status: "ready",
+        repository: "Jidong-Yang/copilot-dsh-provider",
+        version: identity.version,
+        revision: identity.revision,
+      })
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json(await client.health(request.signal))
     }
