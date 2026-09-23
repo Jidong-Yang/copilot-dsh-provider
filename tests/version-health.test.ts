@@ -31,7 +31,7 @@ async function checkServer(
       COPILOT_GITHUB_TOKEN: "",
       HTTP_PROXY: "http://127.0.0.1:9",
       HTTPS_PROXY: "http://127.0.0.1:9",
-      ...(noGit ? { PATH: "", Path: "" } : {}),
+      ...(noGit ? { PATH: join(cwd, "no-executables"), Path: join(cwd, "no-executables") } : {}),
     },
     stdout: "pipe",
     stderr: "pipe",
