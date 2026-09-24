@@ -163,6 +163,13 @@ Add a second custom provider for models that Copilot serves only through Chat Co
 | API protocol | `openai-completions` |
 | API key | Any non-secret placeholder, such as `local-copilot-provider` |
 
+Keep each Base URL paired with the protocol shown above. In particular,
+`/responses/v1` must use `openai-responses`; if DeepSeek Harness retains or
+saves `openai-completions` for that route, session requests are sent to the
+wrong endpoint and fail with `404 Not found`. Correct the protocol in
+**Settings -> Models** (or `~/.dsh/settings.yaml`) and restart DeepSeek Harness
+if the running Web Host still shows the previous value.
+
 Use **Fetch available models** on each route, choose the models to expose, and
 save. When the Copilot catalog changes, make sure the scheduled provider is
 running, use **Fetch available models** again on both routes, and restart
