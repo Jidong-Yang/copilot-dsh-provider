@@ -107,9 +107,11 @@ Merge the printed TOML into `~/.codex/config.toml`, then keep this provider
 running while using either Codex client. The generated configuration is:
 
 ```toml
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_provider = "github-copilot"
 model_catalog_json = "C:\\Users\\you\\.copilot-dsh-provider\\codex-models.json"
+model_reasoning_effort = "medium"
+web_search = "disabled"
 
 [model_providers.github-copilot]
 name = "GitHub Copilot"
@@ -117,6 +119,10 @@ base_url = "http://127.0.0.1:4141/codex/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = false
+
+[model_providers.github-copilot.capabilities]
+remote_compaction = "unsupported"
+external_web_access = false
 ```
 
 Provider settings must be in the user-level file, not a project-local
@@ -125,8 +131,9 @@ Provider settings must be in the user-level file, not a project-local
 changing the file. No OpenAI API key is needed because the localhost provider
 owns GitHub authentication.
 
-The model in `codex-config` is only the initial selection. The command writes a
-Codex catalog snapshot containing every Responses-compatible model in the
+The default initial selection is `gpt-6.1-sol` with the catalog's preferred
+reasoning effort (`medium` when supported). The command writes a
+Codex catalog snapshot containing every Responses- or Chat-Completions-compatible model in the
 authorized Copilot subscription, including its context window, input
 modalities, and reasoning levels. This replaces Codex's bundled picker catalog,
 so unsupported built-in models are not shown. Use the model picker in CLI or
@@ -140,6 +147,131 @@ Run `bun run codex-config` again whenever the Copilot model catalog changes,
 then restart Codex Desktop or start a new Codex CLI process so it reloads the
 generated catalog. The generated catalog contains model metadata only; the
 GitHub credential remains inside the provider.
+
+### Codex compatibility and long conversations
+
+The Codex route selects the protocol from the Copilot model catalog, cached
+for 60 seconds. Models supporting Responses use native Responses, including
+native reasoning history. Chat-only models use a Responses-to-Chat adapter
+that preserves instructions, message text, user images, function calls,
+parallel call groups, textual tool results, reasoning effort, and JSON-schema
+output controls. Namespace functions are flattened with collision-safe names
+and restored on returned calls. Responses SSE events are emitted incrementally
+with usage and sequence numbers; disconnects cancel the upstream stream.
+The generic Harness routes keep their existing protocol-specific behavior.
+
+Chat Completions cannot represent encrypted Responses reasoning history,
+remote compaction items, custom/freeform tools, hosted web search, or image
+tool results. Such requests receive a local `400` rather than silently losing
+history or tools. Start a new conversation when switching from a native
+Responses model to a Chat-only model if the existing history contains these
+items. Hosted web search is disabled in the generated shared configuration;
+use a client-side function/MCP search tool instead.
+
+Keep the provider named `GitHub Copilot` and the remote-compaction capability
+set to `unsupported`: Codex performs automatic and manual `/compact` through
+its local summarization flow using ordinary Responses requests. The catalog
+sets an explicit automatic-compaction threshold no higher than 90% of the
+context window, the reported prompt limit, or the context window minus the
+maximum output allowance. It includes both legacy base instructions and the
+current `model_messages` instruction schema. The provider does not secretly
+trim conversation content, retry oversized inference requests, or fabricate
+encrypted compaction state. Calling `/codex/v1/responses/compact` directly
+returns `501` with configuration guidance.
+
+Codex request bodies support identity, gzip, deflate, and zstd encoding. The
+local limit is **128 MiB**, measured on decoded UTF-8 JSON bytes as well as
+Bun's transport-level body limit. A local parser rejection uses `400`, an
+unsupported encoding uses `415`, and a local body-size rejection uses `413`
+with code `request_body_too_large`. Upstream errors, including Copilot's
+`413 failed to parse request`, retain their original status, headers, and body.
+Size limits are distinct from model token limits; an upstream `413` is not
+rewritten as a token-context error.
+
+Handled inference responses carry `x-provider-error-source` (`provider`,
+`upstream`, or `none`). Bun can reject oversized transport bodies before the
+handler runs, so those runtime responses have no provider diagnostic header.
+Runtime diagnostics are appended to
+`~/.copilot-dsh-provider/provider.log`: inbound and forwarded request byte
+counts, selected protocol, status, process ID, upstream request ID, and stream event
+counts, never prompts, tool arguments/results, credentials, or raw errors.
+After an upstream `413`, use `/compact` or start a smaller conversation and
+reduce large attachments; raising the local body limit does not change the
+upstream limit.
+
+## Request instrumentation and service health
+
+All inference aliases, model catalogs, and handled invalid routes now emit a
+correlated lifecycle: `request_started`, upstream attempt records,
+`response_headers`, and exactly one `request_completed`. The provider generates
+the ID rather than trusting incoming headers and returns it as
+`x-provider-request-id`. `requestId` is shared across lifecycle and attempt
+records; `upstreamRequestId` identifies the upstream response and
+`upstreamClientRequestId` the outbound request. Attempts are numbered within
+each stage (`models` or `inference`); retries do not add completed requests.
+
+Terminal records include observed request/response bytes, header latency,
+first-body-byte latency, **full-body duration**, source, and outcome:
+`success`, `failure`, `rejected`, `cancelled`, `incomplete`, or `unverified`.
+HTTP 200 alone does not count as successful inference: Responses and Chat SSE
+are inspected for completion, failure, incomplete output, malformed events,
+and premature EOF. JSON failure/incomplete responses are also classified.
+Read errors and client aborts finish the lifecycle even when no normal stream
+flush occurs; cancellation propagates to the upstream body. Explicit timeout
+abort reasons are classified separately from ordinary client cancellation.
+Observation preserves response bytes and honors downstream backpressure.
+Successful HTTP responses without a recognized inference terminal marker are
+`unverified`, not assumed successful. Duration measurements use a monotonic
+clock so wall-clock corrections do not distort latency metrics.
+
+HTTP 401/403/429 and 5xx count as service failures. Ordinary request rejection
+(including 400/413 and intentional unsupported compaction), cancellation, and
+unverifiable output do not lower the service's last-observed quality state.
+Invalid JSON is classified as rejection even on generic routes whose existing
+HTTP error envelope retains status 502.
+Incomplete output is counted separately from success. SSE inspection retains
+at most one million characters per frame, and JSON inspection at most one
+million bytes per response; exceeding these bounds produces `unverified`,
+not an invented success or a changed response. No response text is logged.
+Bytes and timing describe the provider's observed body, not client receipt
+confirmation or compressed network traffic.
+
+| Endpoint | Meaning |
+|---|---|
+| `GET /health/live` | HTTP 200 while the HTTP process can respond; does not call GitHub. |
+| `GET /health/ready` | Existing authentication/upstream readiness payload; HTTP 200 for `ready`, otherwise 503. |
+| `GET /health/metrics` | Local snapshot of uptime, PID, in-flight count, lifetime outcomes, and rolling latency/failure metrics; does not call GitHub. |
+| `GET /health` | Existing readiness JSON and HTTP 200 behavior, preserved for current clients. |
+| `GET /health/version` | Build identity only, independent of authentication and request quality. |
+
+The metrics snapshot has separate dependency and service states. Dependency
+tracks authentication/upstream availability; service tracks the latest
+completed success, failure, or incomplete request. Health changes emit
+`health` records with their scope and previous/new state. Repeated observations
+refresh timestamps without repeating transitions, and `service.stale` signals
+that no evaluated completion has occurred for five minutes. Overall `status`
+is `unavailable` when the dependency needs reauthentication or is unreachable,
+`degraded` for observed service/logging failure, `ready` when the dependency
+is ready without such degradation, and otherwise `unknown`. This is not a
+continuous synthetic inference probe, and concurrent completions may restore
+the last-observed service state while older failures remain in window metrics.
+
+The rolling window is **five minutes, capped at the latest 1,000 completions**;
+lifetime counters survive window expiry but reset on process restart.
+`failureRate` divides failures by evaluated success/failure/incomplete
+completions, excluding rejection, cancellation, and unverified responses.
+Header, first-byte, and full-duration p50/p95/max include the retained samples.
+Health probes are excluded so polling does not inflate workload metrics.
+Unknown URL paths are redacted to `/unknown`, and queries, request/response
+content, credentials, raw exceptions, and arbitrary caller IDs are never
+written to instrumentation logs.
+
+Log writes are serialized. Storage errors produce a fixed stderr warning and
+an observable logging failure count without breaking inference delivery;
+logging degradation clears after successful writes resume. Requests rejected
+by Bun before the handler, process crashes, and forced termination cannot
+produce a terminal application record; supervise `/health/live` externally
+for those failures.
 
 ## Configure DeepSeek Harness
 
@@ -192,7 +324,8 @@ Requests are passed through without collapsing conversation content. An image at
 | `GET /health` | Safe model-authentication readiness |
 | `GET /health/version` | Local process readiness and exact build identity, without model authentication |
 | `GET /codex/v1/models` | Dynamic Codex CLI/Desktop model catalog |
-| `POST /codex/v1/responses` | Codex Responses request and stream proxy |
+| `POST /codex/v1/responses` | Codex inference with native Responses or Chat Completions conversion |
+| `POST /codex/v1/responses/compact` | Explicit unsupported-remote-compaction error; use Codex local `/compact` |
 | `GET /responses/v1/models` | Dynamic Responses-compatible model catalog |
 | `POST /responses/v1/responses` | Transparent Responses request and stream proxy |
 | `GET /chat/v1/models` | Dynamic Chat Completions-compatible model catalog |
@@ -202,7 +335,7 @@ The legacy `/v1/models`, `/v1/responses`, and `/v1/chat/completions` paths remai
 
 The inbound API key is intentionally ignored. Never place a GitHub token in the Harness API-key field.
 
-Responses and Chat Completions inference responses are transparent upstream
+Generic Responses and Chat Completions inference responses are transparent upstream
 responses: the provider preserves their status, status text, headers, and body,
 including upstream error responses. Failures generated by the localhost
 provider instead use a stable OpenAI-compatible envelope:

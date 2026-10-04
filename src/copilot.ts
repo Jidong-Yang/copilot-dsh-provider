@@ -7,6 +7,10 @@ import {
   validRetryAfter,
 } from "./errors.ts"
 import type { ProviderFailureCode } from "./errors.ts"
+import { createChatToolNameMap, fromChatCompletion, toChatCompletion } from "./chat-responses.ts"
+import { CodexRequestError } from "./codex-request.ts"
+import type { RequestLogger } from "./log.ts"
+import type { RequestContext } from "./instrumentation.ts"
 
 interface SessionTokenReply {
   expires_at: number
@@ -28,6 +32,7 @@ interface CopilotModel {
     }
     limits?: {
       max_context_window_tokens?: number
+      max_prompt_tokens?: number
       max_output_tokens?: number
     }
   }
@@ -61,12 +66,22 @@ export interface ModelHealth {
 export class CopilotClient {
   private session?: { token: string; expiresAt: number; apiBase: string }
   private pendingSession?: Promise<{ token: string; expiresAt: number; apiBase: string }>
+  private codexModelCache?: { models: CopilotModel[]; expiresAt: number }
+  private readonly healthListeners = new Set<(health: object, requestId?: string) => void>()
   private modelHealth: ModelHealth = {
     status: "checking",
     observedAt: new Date().toISOString(),
   }
 
-  public constructor(private readonly githubTokenSource: GitHubTokenSource) {}
+  public constructor(
+    private readonly githubTokenSource: GitHubTokenSource,
+    private readonly logger?: RequestLogger,
+  ) {}
+
+  public onHealthChange(listener: (health: object, requestId?: string) => void): void {
+    this.healthListeners.add(listener)
+    listener(this.modelHealth)
+  }
 
   public async health(signal?: AbortSignal): Promise<ModelHealth> {
     try {
@@ -76,10 +91,11 @@ export class CopilotClient {
           fetch(`${session.apiBase}/models`, {
             headers: copilotHeaders(session.token, false),
             signal,
-          }))
+          }), signal)
         await response.body?.cancel()
       }
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error
       if (this.modelHealth.status !== "reauth-required") {
         this.setHealth("upstream-unavailable", "upstream-unavailable")
       }
@@ -90,8 +106,9 @@ export class CopilotClient {
   public async models(
     protocol: CopilotProtocol = "responses",
     signal?: AbortSignal,
+    context?: RequestContext,
   ): Promise<object> {
-    const upstream = await this.fetchModels(signal)
+    const upstream = await this.fetchModels(signal, context)
     return {
       object: "list",
       data: upstream.data
@@ -125,16 +142,22 @@ export class CopilotClient {
     }
   }
 
-  public async codexModels(signal?: AbortSignal): Promise<object> {
-    const upstream = await this.fetchModels(signal)
-    const models = upstream.data
+  public async codexModels(signal?: AbortSignal, context?: RequestContext): Promise<object> {
+    const models = (await this.codexModelsForRouting(signal, context))
       .filter(model => model.model_picker_enabled !== false)
-      .filter(model => supportsProtocol(model, "responses"))
+      .filter(model => supportsProtocol(model, "responses") || supportsProtocol(model, "chat-completions"))
 
     return {
       models: models.map((model, index) => {
         const efforts = model.capabilities?.supports?.reasoning_effort ?? []
         const contextWindow = model.capabilities?.limits?.max_context_window_tokens
+        const promptLimit = model.capabilities?.limits?.max_prompt_tokens
+        const outputLimit = model.capabilities?.limits?.max_output_tokens ?? 0
+        const compactLimit = contextWindow === undefined ? undefined : Math.max(1, Math.min(
+          Math.floor(contextWindow * 0.9),
+          contextWindow - outputLimit,
+          promptLimit ?? contextWindow,
+        ))
         return {
           slug: model.id,
           display_name: model.name ?? model.id,
@@ -151,6 +174,7 @@ export class CopilotClient {
           availability_nux: null,
           upgrade: null,
           base_instructions: CODEX_BASE_INSTRUCTIONS,
+          model_messages: { instructions_template: CODEX_BASE_INSTRUCTIONS },
           supports_reasoning_summary_parameter: false,
           support_verbosity: false,
           default_verbosity: null,
@@ -161,7 +185,10 @@ export class CopilotClient {
             : {
                 context_window: contextWindow,
                 max_context_window: contextWindow,
+                auto_compact_token_limit: compactLimit,
               }),
+          effective_context_window_percent: 95,
+          supports_search_tool: false,
           experimental_supported_tools: [],
           input_modalities: model.capabilities?.supports?.vision === true
             ? ["text", "image"]
@@ -171,34 +198,93 @@ export class CopilotClient {
     }
   }
 
-  public async response(payload: unknown, signal?: AbortSignal): Promise<Response> {
-    return await this.request("responses", withExplicitNonStrictTools(payload), signal)
+  public async response(payload: unknown, signal?: AbortSignal, context?: RequestContext): Promise<Response> {
+    return await this.request("responses", withExplicitNonStrictTools(payload), signal, context)
   }
 
-  public async chatCompletion(payload: unknown, signal?: AbortSignal): Promise<Response> {
-    return await this.request("chat/completions", payload, signal)
+  public async codexResponse(payload: unknown, signal?: AbortSignal, context?: RequestContext): Promise<Response> {
+    if (!isRecord(payload) || typeof payload["model"] !== "string" || !payload["model"].trim()) {
+      throw new CodexRequestError(400, "invalid_request_error", "A non-empty model is required.", "model")
+    }
+    if (payload["store"] === true || payload["previous_response_id"] !== undefined) {
+      throw new CodexRequestError(400, "unsupported_stateful_request",
+        "Codex requests must contain full history and use store: false.")
+    }
+    const models = await this.codexModelsForRouting(signal, context)
+    const model = models.find(model => model.id === payload["model"] && model.model_picker_enabled !== false)
+    if (!model) throw new CodexRequestError(400, "model_not_found",
+      "The selected model is not in the Copilot catalog. Regenerate the Codex model catalog.", "model")
+    let protocol: CopilotProtocol
+    let upstreamPayload: unknown
+    let names: ReturnType<typeof createChatToolNameMap> | undefined
+    if (supportsProtocol(model, "responses")) {
+      protocol = "responses"
+      upstreamPayload = withExplicitNonStrictTools(payload)
+    } else if (supportsProtocol(model, "chat-completions")) {
+      protocol = "chat-completions"
+      try {
+        names = createChatToolNameMap(payload)
+        upstreamPayload = toChatCompletion(withExplicitNonStrictTools(payload))
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error
+        throw new CodexRequestError(400, "unsupported_codex_request",
+          "This request cannot be represented by the selected Chat Completions model. Use a Responses model or disable unsupported tools.")
+      }
+    } else {
+      throw new CodexRequestError(400, "unsupported_model_protocol", "The selected model has no supported inference protocol.", "model")
+    }
+    const upstream = await this.request(
+      protocol === "responses" ? "responses" : "chat/completions", upstreamPayload, signal, context,
+    )
+    if (!context) await this.logger?.write({
+      event: "upstream", route: "/codex/v1/responses", protocol,
+      source: "upstream", status: upstream.status,
+      requestBytes: Buffer.byteLength(JSON.stringify(upstreamPayload)),
+      requestId: upstream.headers.get("x-request-id") ?? upstream.headers.get("x-github-request-id") ?? undefined,
+    })
+    return protocol === "responses" ? upstream : await fromChatCompletion(upstream, model.id, names)
+  }
+
+  private async codexModelsForRouting(signal?: AbortSignal, context?: RequestContext): Promise<CopilotModel[]> {
+    if (this.codexModelCache && this.codexModelCache.expiresAt > Date.now()) return this.codexModelCache.models
+    const { data } = await this.fetchModels(signal, context)
+    this.codexModelCache = { models: data, expiresAt: Date.now() + 60_000 }
+    return data
+  }
+
+  public async chatCompletion(payload: unknown, signal?: AbortSignal, context?: RequestContext): Promise<Response> {
+    return await this.request("chat/completions", payload, signal, context)
   }
 
   private async request(
     path: "chat/completions" | "responses",
     payload: unknown,
     signal?: AbortSignal,
+    context?: RequestContext,
   ): Promise<Response> {
-    return await this.requestWithSession(session =>
-      fetch(`${session.apiBase}/${path}`, {
+    const body = JSON.stringify(payload)
+    const protocol = path === "responses" ? "responses" : "chat-completions"
+    return await this.requestWithSession(session => {
+      const headers = copilotHeaders(session.token, hasAgentInput(payload))
+      const action = () => fetch(`${session.apiBase}/${path}`, {
         method: "POST",
-        headers: copilotHeaders(session.token, hasAgentInput(payload)),
-        body: JSON.stringify(payload),
+        headers,
+        body,
         signal,
-      }))
+      })
+      return context ? context.upstream(action, "inference", protocol, Buffer.byteLength(body), headers["x-request-id"]) : action()
+    }, signal, context)
   }
 
-  private async fetchModels(signal?: AbortSignal): Promise<ModelsReply> {
-    const response = await this.requestWithSession(session =>
-      fetch(`${session.apiBase}/models`, {
-        headers: copilotHeaders(session.token, false),
+  private async fetchModels(signal?: AbortSignal, context?: RequestContext): Promise<ModelsReply> {
+    const response = await this.requestWithSession(session => {
+      const headers = copilotHeaders(session.token, false)
+      const action = () => fetch(`${session.apiBase}/models`, {
+        headers,
         signal,
-      }))
+      })
+      return context ? context.upstream(action, "models", undefined, undefined, headers["x-request-id"]) : action()
+    }, signal, context)
     if (!response.ok) return await passthroughError(response)
     return await response.json() as ModelsReply
   }
@@ -207,17 +293,22 @@ export class CopilotClient {
     request: (
       session: { token: string; expiresAt: number; apiBase: string },
     ) => Promise<Response>,
+    signal?: AbortSignal,
+    context?: RequestContext,
   ): Promise<Response> {
+    signal?.throwIfAborted()
     const session = await this.sessionToken()
+    signal?.throwIfAborted()
     let response: Response
     try {
       response = await request(session)
     } catch (error) {
-      this.setHealth("upstream-unavailable", "upstream-unavailable")
+      if (signal?.aborted) throw error
+      this.setHealth("upstream-unavailable", "upstream-unavailable", context?.id)
       throw classifyProviderError(error, "upstream-unavailable")
     }
     if (![401, 403].includes(response.status)) {
-      this.observeResponse(response)
+      this.observeResponse(response, context?.id)
       return response
     }
 
@@ -227,19 +318,21 @@ export class CopilotClient {
     let retrySession: { token: string; expiresAt: number; apiBase: string }
     try {
       retrySession = await this.sessionToken()
+      signal?.throwIfAborted()
       retried = await request(retrySession)
     } catch (error) {
+      if (signal?.aborted) throw error
       if (this.modelHealth.status !== "reauth-required") {
-        this.setHealth("upstream-unavailable", "upstream-unavailable")
+        this.setHealth("upstream-unavailable", "upstream-unavailable", context?.id)
       }
       if (error instanceof ProviderRequestError) throw error
       throw classifyProviderError(error, "upstream-unavailable")
     }
     if ([401, 403].includes(retried.status)) {
       if (this.session === retrySession) this.session = undefined
-      this.setHealth("reauth-required", "copilot-access-rejected")
+      this.setHealth("reauth-required", "copilot-access-rejected", context?.id)
     } else {
-      this.observeResponse(retried)
+      this.observeResponse(retried, context?.id)
     }
     return retried
   }
@@ -356,19 +449,21 @@ export class CopilotClient {
   private setHealth(
     status: ModelHealth["status"],
     code?: ModelHealth["code"],
+    requestId?: string,
   ): void {
     this.modelHealth = {
       status,
       ...(code === undefined ? {} : { code }),
       observedAt: new Date().toISOString(),
     }
+    for (const listener of this.healthListeners) listener(this.modelHealth, requestId)
   }
 
-  private observeResponse(response: Response): void {
+  private observeResponse(response: Response, requestId?: string): void {
     if (response.status === 429 || response.status >= 500) {
-      this.setHealth("upstream-unavailable", "upstream-unavailable")
+      this.setHealth("upstream-unavailable", "upstream-unavailable", requestId)
     } else {
-      this.setHealth("ready")
+      this.setHealth("ready", undefined, requestId)
     }
   }
 }
@@ -418,6 +513,13 @@ function withExplicitNonStrictTools(payload: unknown): unknown {
   if (!isRecord(payload) || !Array.isArray(payload["tools"])) return payload
   let changed = false
   const tools = payload["tools"].map((tool) => {
+    if (isRecord(tool) && tool["type"] === "namespace" && Array.isArray(tool["tools"])) {
+      const nested = withExplicitNonStrictTools({ tools: tool["tools"] })
+      if (isRecord(nested) && nested["tools"] !== tool["tools"]) {
+        changed = true
+        return { ...tool, tools: nested["tools"] }
+      }
+    }
     if (!isRecord(tool) || tool["type"] !== "function" || "strict" in tool) return tool
     changed = true
     return { ...tool, strict: false }

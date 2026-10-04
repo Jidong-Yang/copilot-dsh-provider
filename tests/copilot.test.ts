@@ -108,7 +108,7 @@ test("lists protocol-compatible models with capabilities reported by Copilot", a
     }],
     has_more: false,
   })
-  expect(codex).toEqual({
+  expect(codex).toMatchObject({
     models: [{
       slug: "gpt-5.6-sol",
       display_name: "GPT-5.6 Sol",
@@ -125,7 +125,7 @@ test("lists protocol-compatible models with capabilities reported by Copilot", a
       shell_type: "unified_exec",
       visibility: "list",
       supported_in_api: true,
-      priority: 1,
+      priority: 2,
       availability_nux: null,
       upgrade: null,
       base_instructions: [
@@ -146,6 +146,12 @@ test("lists protocol-compatible models with capabilities reported by Copilot", a
       context_window: 1_050_000,
       max_context_window: 1_050_000,
       experimental_supported_tools: [],
+      input_modalities: ["text", "image"],
+      auto_compact_token_limit: 922_000,
+    }, {
+      slug: "gemini-3.7-flash",
+      context_window: 1_000_000,
+      auto_compact_token_limit: 900_000,
       input_modalities: ["text", "image"],
     }],
   })

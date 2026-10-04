@@ -133,6 +133,7 @@ test("serves Codex Responses aliases", async () => {
     models: () => Promise.resolve({ object: "list", data: [] }),
     codexModels,
     response,
+    codexResponse: response,
     chatCompletion: () => Promise.resolve(new Response()),
   })
 

@@ -27,7 +27,7 @@ async function checkServer(
     env: {
       ...process.env,
       PORT: String(port),
-      COPILOT_DSH_HOME: join(cwd, "empty-credentials"),
+      COPILOT_DSH_HOME: join(cwd, "..", "runtime-credentials"),
       COPILOT_GITHUB_TOKEN: "",
       HTTP_PROXY: "http://127.0.0.1:9",
       HTTPS_PROXY: "http://127.0.0.1:9",
